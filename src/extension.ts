@@ -1,10 +1,8 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
-import { activateConfig } from './config';
+import { registerOpenConfigCommand } from './commands/openConfig.command.js';
 
 export function activate(context: vscode.ExtensionContext) {
-	activateConfig(context);
+	registerOpenConfigCommand(context);
 }
 
 export function deactivate() {}
