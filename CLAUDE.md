@@ -29,8 +29,9 @@ src/
 ├── config/
 │   └── settings.ts           # Config webview panel (UI + message handling)
 ├── services/
-│   ├── vault.service.ts      # validateObsidianVault(), detectVaultDirs() — reuse across features
-│   └── vault.constants.ts    # VAULT_DIRS — list of expected subdirs with active flag
+│   └── vault.service.ts      # validateObsidianVault(), detectVaultDirs() — reuse across features
+├── types/
+│   └── constants.ts          # VAULT_DIRS — list of expected subdirs with default flag
 ├── utils/
 │   └── helpers.ts            # getNonce() for CSP nonces
 ├── features/                 # (empty) future domain features
@@ -54,9 +55,9 @@ test/
 5. `detectVaultDirs()` then checks for the directories in `VAULT_DIRS` and auto-creates any that are marked `active` but missing.
 6. The saved vault path is persisted to `globalStorageUri/ai_obsidian_sandt.conf`.
 
-**Vault directory logic** (`src/services/`):
-- `VAULT_DIRS` in `vault.constants.ts` — array of `{ name, active }`. `snippets` and `agents_conf` are active (auto-created); `commands` and `templates` are passive (detected only).
-- `validateObsidianVault` and `detectVaultDirs` are intentionally kept in `services/` so future features can import them without coupling to the config UI.
+**Vault directory logic** (`src/types/constants.ts` and `src/services/vault.service.ts`):
+- `VAULT_DIRS` — array of `{ name, dir, default }`. `snippets` and `agents_conf` are set to `default: true` (auto-created); `commands`, `templates`, and `variables` are `default: false` (detected only).
+- `detectVaultDirs()` checks for directories in `VAULT_DIRS` and auto-creates any marked `default: true` if missing.
 
 **No runtime dependencies** — only the VS Code API, Node `fs`, and Node `path` are used.
 
