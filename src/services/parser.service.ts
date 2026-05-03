@@ -1,0 +1,194 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import type { ArtifactType, ParsedArtifactFile, ParsedFrontmatter, ParsedVar } from '../types/parsed-artifact.types.js';
+
+// Accepted `type` values — any unrecognised value keeps the 'snippet' fallback.
+const VALID_TYPES = new Set<string>(['snippet', 'template', 'command', 'agent', 'variables']);
+
+/**
+ * Extracts and parses the YAML frontmatter block from raw vault file content.
+ *
+ * Frontmatter must appear at the very start of the file between `---` fences.
+ * Unknown keys are silently skipped; an invalid `type` value falls back to `'snippet'`.
+ *
+ * @param content - Full UTF-8 string content of the `.md` file.
+ * @returns Populated `ParsedFrontmatter`; returns `{ type: 'snippet' }` when no frontmatter is found.
+ *
+ * @example
+ * parseFrontmatter('---\ntype: template\ntitle: React Component\nlanguage: tsx\n---\n')
+ * // → { type: 'template', title: 'React Component', language: 'tsx' }
+ */
+function parseFrontmatter(content: string): ParsedFrontmatter {
+    // Match everything between the opening and closing --- fences
+    const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
+    const result: ParsedFrontmatter = { type: 'snippet' };
+    if (!match) { return result; }
+
+    // Parse each `key: value` line — skip lines without a colon
+    for (const line of match[1].split(/\r?\n/)) {
+        const colonIdx = line.indexOf(':');
+        if (colonIdx === -1) { continue; }
+        const key = line.slice(0, colonIdx).trim();
+        const raw = line.slice(colonIdx + 1).trim();
+
+        if (key === 'type') {
+            // Validate against the whitelist before assigning
+            if (VALID_TYPES.has(raw)) { result.type = raw as ArtifactType; }
+        } else if (key === 'tags') {
+            // Parse inline array syntax: `[a, b, c]` → `['a', 'b', 'c']`
+            const inner = raw.replace(/^\[|\]$/g, '');
+            result.tags = inner.split(',').map(t => t.trim()).filter(Boolean);
+        } else if (key === 'title' || key === 'description' || key === 'language' || key === 'env' || key === 'target') {
+            result[key] = raw;
+        }
+    }
+
+    return result;
+}
+
+/**
+ * Extracts the content of the ` ```code ` fenced block from a vault file.
+ *
+ * The frontmatter section is stripped first to prevent false matches.
+ * Trailing whitespace is removed so the inserted content does not carry an
+ * unwanted trailing newline into the editor.
+ *
+ * @param content - Full UTF-8 string content of the `.md` file.
+ * @returns Code block body as a trimmed string, or `''` if no ` ```code ` block is found.
+ *
+ * @example
+ * parseCodeBlock('---\ntype: snippet\n---\n\n```code\nconsole.log("hi");\n```')
+ * // → 'console.log("hi");'
+ */
+function parseCodeBlock(content: string): string {
+    // Strip frontmatter before scanning to avoid matching a fence inside it
+    const afterFrontmatter = content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
+    const match = /```code\r?\n([\s\S]*?)```/.exec(afterFrontmatter);
+    return match ? match[1].trimEnd() : '';
+}
+
+/**
+ * Converts a raw `KEY=value` block into an ordered array of `ParsedVar` objects.
+ *
+ * Lines that do not contain `=` are skipped. Lines starting with `#` (comments)
+ * are skipped. A value may be empty (`KEY=` is valid and yields `defaultValue: ''`).
+ *
+ * @param raw - Multi-line string of `KEY=value` pairs.
+ * @returns Ordered array of `{ name, defaultValue }` objects.
+ *
+ * @example
+ * parseVarLines('port=8080\nimage=nginx\n')
+ * // → [{ name: 'port', defaultValue: '8080' }, { name: 'image', defaultValue: 'nginx' }]
+ */
+function parseVarLines(raw: string): ParsedVar[] {
+    return raw
+        .split(/\r?\n/)
+        .filter(l => l.includes('=') && !l.trim().startsWith('#'))
+        .map(l => {
+            const eq = l.indexOf('=');
+            return { name: l.slice(0, eq).trim(), defaultValue: l.slice(eq + 1).trim() };
+        })
+        .filter(v => v.name.length > 0);
+}
+
+/**
+ * Locates and parses the variables section from raw vault file content.
+ *
+ * Two formats are supported, tried in priority order:
+ * 1. **Fenced block** — ` ```vars\nKEY=val\n``` ` (standard for `type: variables` files).
+ * 2. **Unfenced section** — a `vars:` or `vars` label on its own line followed by
+ *    `KEY=value` pairs, placed after the ` ```code` block.
+ *
+ * @param content - Full UTF-8 string content of the `.md` file.
+ * @returns Ordered array of `ParsedVar` objects, or `[]` when no vars section exists.
+ *
+ * @example
+ * // Fenced format (type: variables)
+ * parseVars('...\n```vars\nAPI_URL=http://localhost\n```')
+ * // → [{ name: 'API_URL', defaultValue: 'http://localhost' }]
+ *
+ * // Unfenced format (snippet / command / template)
+ * parseVars('...\n```code\n...\n```\n\nvars:\nroute=/test\n')
+ * // → [{ name: 'route', defaultValue: '/test' }]
+ */
+function parseVars(content: string): ParsedVar[] {
+    // Priority 1: fenced ```vars block — used by type: variables files
+    const fenced = /```vars\r?\n([\s\S]*?)```/.exec(content);
+    if (fenced) { return parseVarLines(fenced[1]); }
+
+    // Priority 2: unfenced section after the code block ("vars:" or "vars" label)
+    const afterCode = content
+        .replace(/^---[\s\S]*?---/, '')     // strip frontmatter
+        .replace(/```code[\s\S]*?```/, ''); // strip code block
+    const unfenced = /\bvars:?\s*\r?\n([\s\S]+?)(?:\n\n|\n*$)/.exec(afterCode);
+    if (unfenced) { return parseVarLines(unfenced[1]); }
+
+    return [];
+}
+
+/**
+ * Reads and fully parses a single vault `.md` artifact file into a structured object.
+ *
+ * Combines frontmatter, code block, and vars section into a `ParsedArtifactFile`
+ * that the picker panel uses for display and insert-time variable resolution.
+ *
+ * @param filePath - Absolute path to the `.md` file on disk.
+ * @param artifactRootDir - Absolute path to the artifact's root directory
+ *   (e.g. `/vault/Snippets`). Used to compute the `relativePath` field.
+ * @returns A fully populated `ParsedArtifactFile`, or `null` if the file cannot be read.
+ *
+ * @example
+ * parseArtifactFile('/vault/Snippets/Web/express-route.md', '/vault/Snippets')
+ * // → {
+ * //   filePath:     '/vault/Snippets/Web/express-route.md',
+ * //   fileName:     'express-route',
+ * //   relativePath: 'Web/express-route.md',
+ * //   frontmatter:  { type: 'snippet', title: 'Express Route', language: 'javascript' },
+ * //   code:         'app.get("/{{route}}", (req, res) => { ... })',
+ * //   vars:         [{ name: 'route', defaultValue: '/test' }],
+ * // }
+ */
+/**
+ * Parses pre-read vault `.md` file content into a structured object.
+ *
+ * Functionally identical to `parseArtifactFile` but accepts the file content
+ * as a string rather than reading it from disk. Intended for async callers
+ * (e.g. the QuickPick picker) that read file bytes via `vscode.workspace.fs`.
+ *
+ * @param content         - UTF-8 file content string.
+ * @param filePath        - Absolute OS path to the file (used to compute `fileName` and `relativePath`).
+ * @param artifactRootDir - Absolute path to the artifact root directory.
+ * @returns Fully populated `ParsedArtifactFile`.
+ *
+ * @example
+ * const bytes = await vscode.workspace.fs.readFile(uri);
+ * const content = new TextDecoder().decode(bytes);
+ * parseFromContent(content, uri.fsPath, rootUri.fsPath);
+ */
+export function parseFromContent(content: string, filePath: string, artifactRootDir: string): ParsedArtifactFile {
+    return {
+        filePath,
+        fileName:     path.basename(filePath, '.md'),
+        relativePath: path.relative(artifactRootDir, filePath),
+        frontmatter:  parseFrontmatter(content),
+        code:         parseCodeBlock(content),
+        vars:         parseVars(content),
+    };
+}
+
+export function parseArtifactFile(filePath: string, artifactRootDir: string): ParsedArtifactFile | null {
+    try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        return {
+            filePath,
+            fileName:     path.basename(filePath, '.md'),
+            relativePath: path.relative(artifactRootDir, filePath),
+            frontmatter:  parseFrontmatter(content),
+            code:         parseCodeBlock(content),
+            vars:         parseVars(content),
+        };
+    } catch {
+        // File unreadable or parse error — caller shows appropriate UI feedback
+        return null;
+    }
+}

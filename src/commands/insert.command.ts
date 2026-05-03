@@ -1,55 +1,84 @@
 import * as vscode from 'vscode';
 import { ARTIFACTS } from '../types/constants.js';
+import { openArtifactPicker } from '../panels/artifactPicker.panel.js';
 
 /**
- * Argument passed to `obsidian-artifacts.insert.artifact` by menu items.
- * The `dir` field matches the artifact's `dir` property in ARTIFACTS.
+ * Derives the VS Code command ID for an artifact's insert command.
+ *
+ * Pattern: `obsidian-artifacts.insert.<dir.toLowerCase()>`
+ *
+ * This pattern must stay in sync with the command IDs declared in `package.json`
+ * (`contributes.commands`) and the menu entries that reference them. Adding a new
+ * artifact to `ARTIFACTS` requires adding a matching entry in `package.json` —
+ * the TypeScript handler is registered automatically via the loop below.
+ *
+ * @param dir - The artifact's `dir` field (e.g. `'Snippets'`, `'AgentsConf'`).
+ * @returns The fully-qualified VS Code command ID string.
+ *
+ * @example
+ * artifactCommandId('Snippets')   // → 'obsidian-artifacts.insert.snippets'
+ * artifactCommandId('AgentsConf') // → 'obsidian-artifacts.insert.agentsconf'
  */
-export interface InsertArtifactArg {
-	dir: string;
+export function artifactCommandId(dir: string): string {
+    return `obsidian-artifacts.insert.${dir.toLowerCase()}`;
 }
 
 /**
- * Registers the two insert-related commands:
+ * Dynamically registers one VS Code insert command per artifact defined in `ARTIFACTS`.
  *
- * - `obsidian-artifacts.insert.artifact` — single parameterised command for all artifact
- *   insert operations. Menu items pass `{"dir": "<ArtifactDir>"}` as the argument so one
- *   handler covers every artifact type. Adding a new artifact to constants.ts only requires
- *   a new menu entry in package.json — no new command registration.
+ * ### Architecture — why one loop produces multiple command IDs
  *
- * - `obsidian-artifacts.edit.variables` — dedicated command for the Variables artifact,
- *   which is an edit/view operation rather than an insert.
+ * VS Code derives the label shown in a context menu **exclusively** from the
+ * `title` field of the matching entry in `contributes.commands` (in `package.json`).
+ * Per-item title overrides in `contributes.menus` entries are silently ignored.
+ * Therefore, showing "Insert Snippets", "Insert Templates", etc. as distinct labels
+ * requires a distinct command ID for each artifact — there is no other VS Code mechanism.
  *
- * Both are placeholders — replace the showInformationMessage body with real picker UI.
+ * At the TypeScript level this is still architecturally "one command":
+ * - One registration function (`registerInsertCommands`)
+ * - One loop over `ARTIFACTS` — adding an artifact to constants auto-registers its handler
+ * - One shared handler function (`openArtifactPicker`)
+ * - Zero hardcoded artifact names — every string comes from `ARTIFACTS`
  *
- * @param {vscode.ExtensionContext} context - Extension context for subscription management
+ * The `package.json` command entries are the one static piece; they must mirror `ARTIFACTS`
+ * because VS Code reads `package.json` before the extension activates.
+ *
+ * ### Variables — special context behaviour
+ *
+ * `Variables` has `contexts: ['all']` in `ARTIFACTS`, meaning its command
+ * (`insert.variables`) appears in every context surface (editor, terminal, explorer).
+ * In `package.json` it is placed in group `"2_variables@1"` while all other artifacts
+ * use `"1_insert@N"` — VS Code renders different groups with a visual separator, so
+ * Variables always appears at the bottom of the Obsidian Artifacts submenu or as a
+ * standalone entry below the other artifacts when only it is active.
+ *
+ * ### Visibility — single entry vs. submenu
+ *
+ * Each context surface (`editor/context`, `terminal/context`, `explorer/context`) shows:
+ * - A **direct menu entry** for each active artifact when only one is active in that surface
+ *   (`!obsidian-artifacts.<surface>HasMultiple`).
+ * - The **"Obsidian Artifacts" submenu** when two or more artifacts are active in that
+ *   surface (`obsidian-artifacts.<surface>HasMultiple`).
+ *
+ * These `when` clauses and the `*HasMultiple` context keys are managed by `context.service.ts`.
+ *
+ * @param context - Extension context used to register disposable subscriptions.
+ * @returns void
+ *
+ * @example
+ * // Called once inside activate():
+ * registerInsertCommands(context);
  */
 export function registerInsertCommands(context: vscode.ExtensionContext): void {
-	// Parameterised insert command — receives {dir} from the menu item's "args" field
-	const insertDisposable = vscode.commands.registerCommand(
-		'obsidian-artifacts.insert.artifact',
-		(arg: InsertArtifactArg) => {
-			// Look up the artifact by dir to get its display name
-			const artifact = ARTIFACTS.find(a => a.dir === arg?.dir);
-			const label = artifact?.name ?? arg?.dir ?? 'Artifact';
+    // One iteration per artifact — command ID and display name come entirely from ARTIFACTS.
+    // No artifact name, dir, or label is hardcoded in this file.
+    for (const artifact of ARTIFACTS) {
+        const commandId = artifactCommandId(artifact.dir);
 
-			// TODO: replace with quick-pick file picker from the vault directory
-			vscode.window.showInformationMessage(
-				`Obsidian Artifacts: Insert ${label} — coming soon!`
-			);
-		}
-	);
-	context.subscriptions.push(insertDisposable);
+        const disposable = vscode.commands.registerCommand(commandId, () => {
+            void openArtifactPicker(artifact.dir, artifact.name);
+        });
 
-	// Dedicated command for Variables — edit/view semantics, not an insert
-	const variablesDisposable = vscode.commands.registerCommand(
-		'obsidian-artifacts.edit.variables',
-		() => {
-			// TODO: open variable picker / editor
-			vscode.window.showInformationMessage(
-				'Obsidian Artifacts: Edit/See Variables — coming soon!'
-			);
-		}
-	);
-	context.subscriptions.push(variablesDisposable);
+        context.subscriptions.push(disposable);
+    }
 }

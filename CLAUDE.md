@@ -6,74 +6,207 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 npm run compile        # One-off TypeScript build (outputs to dist/)
-npm run watch          # Watch mode for development (preferred during active dev)
+npm run watch          # Watch mode for development (preferred during active development)
 npm run lint           # ESLint check (runs against src/)
-npm run test           # Compile + lint + run tests
+npm run test           # Compile + lint + run all tests
 ```
 
 Press **F5** in VS Code to launch the Extension Development Host.
 
+---
+
 ## What This Extension Does
 
-"Obsidian Notes & Snippets" lets developers access their Obsidian vault's notes and snippets from within VS Code, and create new ones directly from the editor. The extension is early-stage (v0.0.1).
+**Obsidian Artifacts: AI Snippets & Tools** bridges an Obsidian vault and VS Code, letting developers insert vault content — snippets, templates, commands, agent configs, and variables — directly into the editor or terminal without leaving VS Code.
 
-The only active feature is a **Config page** (webview panel) where the user selects their Obsidian vault root. On selection, the vault is validated and required subdirectories are created automatically.
+The current feature set:
+
+- **Config page** — a webview panel where the user selects their Obsidian vault root, validates it, and enables or disables artifact directories.
+- **Artifact picker** — a `vscode.QuickPick`-based hierarchical navigator that opens when the user triggers an insert command. The user navigates subfolders, selects a `.md` file (with a live side-by-side editor preview), fills in any `{{PLACEHOLDER}}` variable values via `showInputBox`, and the resolved content is injected at the cursor (or into the terminal for `command`-type artifacts).
+
+---
 
 ## Folder Structure
 
 ```
 src/
-├── extension.ts              # Entry point — activate() / deactivate()
+├── extension.ts                      # Entry point — activate() / deactivate()
 ├── commands/
-│   └── openConfig.command.ts # Registers obsidian-notes-and-snippets.config
+│   ├── openSettings.command.ts       # Registers obsidian-artifacts.settings
+│   └── insert.command.ts             # Dynamically registers one insert command per artifact
 ├── config/
-│   └── settings.ts           # Config webview panel (UI + message handling)
+│   └── settings.ts                   # Settings webview panel (UI + message handling)
 ├── services/
-│   └── vault.service.ts      # validateObsidianVault(), detectVaultDirs() — reuse across features
+│   ├── vault.service.ts              # validateObsidianVault(), detectVaultDirs(), createVaultDirectory()
+│   ├── context.service.ts            # setVaultContextKeys(), refreshVaultContext()
+│   └── parser.service.ts             # parseArtifactFile() — parses vault .md files
+├── panels/
+│   └── artifactPicker.panel.ts       # Artifact picker webview panel (browse, preview, insert)
 ├── types/
-│   └── constants.ts          # VAULT_DIRS — list of expected subdirs with default flag
+│   ├── constants.ts                  # ARTIFACTS — master list of artifact directories
+│   ├── artifact.types.ts             # Artifact, ArtifactContext, ArtifactsArray interfaces
+│   └── parsed-artifact.types.ts     # ParsedArtifactFile, ParsedFrontmatter, ParsedVar, VaultEntry
 ├── utils/
-│   └── helpers.ts            # getNonce() for CSP nonces
-├── features/                 # (empty) future domain features
-├── providers/                # (empty) future VS Code providers
-└── types/                    # (empty) future shared TypeScript types
+│   └── helpers.ts                    # getNonce() for CSP nonces
+├── features/                         # (empty) reserved for future domain features
+└── providers/                        # (empty) reserved for future VS Code providers
 media/
-└── styles.css                # Webview stylesheet — loaded via webview.asWebviewUri()
+└── styles.css                        # Shared webview stylesheet — loaded via webview.asWebviewUri()
 test/
-└── extension.test.ts         # Mocha test suite
+└── extension.test.ts                 # Mocha test suite
 ```
+
+---
 
 ## Architecture
 
-**Entry point:** `src/extension.ts` — calls `registerOpenConfigCommand(context)` from `src/commands/openConfig.command.ts`.
+### Entry point
 
-**Activation flow:**
-1. `activate()` in `extension.ts` registers the command `obsidian-notes-and-snippets.config` ("AI Obsidian S&T: Config").
-2. The command calls `openSettingsPanel(context)` in `src/config/settings.ts`.
-3. `openSettingsPanel` creates a `WebviewPanel`, loads `media/styles.css` via `webview.asWebviewUri`, and uses `getNonce()` to set the CSP.
-4. When the user picks a folder, `validateObsidianVault()` checks for a `.obsidian/` dir (errors + returns false if absent).
-5. `detectVaultDirs()` then checks for the directories in `VAULT_DIRS` and auto-creates any that are marked `active` but missing.
-6. The saved vault path is persisted to `globalStorageUri/ai_obsidian_sandt.conf`.
+`src/extension.ts` — `activate()` registers all commands, refreshes VS Code context keys, and auto-opens the Settings panel on first use (when no vault is configured).
 
-**Vault directory logic** (`src/types/constants.ts` and `src/services/vault.service.ts`):
-- `VAULT_DIRS` — array of `{ name, dir, default }`. `snippets` and `agents_conf` are set to `default: true` (auto-created); `commands`, `templates`, and `variables` are `default: false` (detected only).
-- `detectVaultDirs()` checks for directories in `VAULT_DIRS` and auto-creates any marked `default: true` if missing.
+### Activation flow
 
-**No runtime dependencies** — only the VS Code API, Node `fs`, and Node `path` are used.
+1. `activate()` calls `registerOpenSettingsCommand(context)` and `registerInsertCommands(context)`.
+2. `refreshVaultContext()` sets all VS Code context keys so context menus reflect the current vault state before the first user interaction.
+3. If no vault path is stored in settings, the Settings panel opens automatically.
+4. A `onDidChangeConfiguration` listener watches `obsidianArtifacts.*` for Settings Sync changes and re-creates any enabled directories that are missing.
+
+### Settings panel (`src/config/settings.ts`)
+
+`openSettingsPanel(context)` creates a `WebviewPanel` (or reveals an existing one). When the user picks a folder:
+- `validateObsidianVault()` confirms the folder contains a `.obsidian/` directory.
+- `detectVaultDirs()` checks which `ARTIFACTS` directories exist on disk.
+- Missing directories that are marked `default: true` in `ARTIFACTS` are auto-created.
+- The vault path and feature flags are saved to `obsidianArtifacts.*` in VS Code settings (enabling Settings Sync).
+
+### Artifact picker (`src/panels/artifactPicker.panel.ts`)
+
+`openArtifactPicker(dir, name)` validates the vault and artifact directory, then hands off to `ArtifactNavigator.run()`. There is no WebviewPanel — the entire picker is a `vscode.QuickPick`.
+
+**`ArtifactNavigator` class:**
+- Maintains a `dirStack` (parent URIs) and `currentDir` for hierarchical navigation.
+- `loadDir(uri)` — reads the directory with `vscode.workspace.fs.readDirectory`, builds items with `$(folder)` / `$(file)` codicons, and updates the QuickPick title to show the breadcrumb path.
+- `handleActiveChange(items)` — fires (debounced 150 ms) on `onDidChangeActive` (keyboard cursor). Reads the file asynchronously, parses it via `parseFromContent`, caches the result in `parseCache`, updates the item description in-place, then opens a `preview: true, preserveFocus: true` editor in `ViewColumn.Beside`.
+- `handleAccept()` — on Enter: navigates into dirs, pops back via the `..` item, or hides the picker and triggers var resolution + insert for file items.
+
+**Module-level helpers:**
+- `resolveVarsInteractive(vars)` — shows a `showInputBox` for each variable; returns `null` if the user cancels any box.
+- `performInsert(editor, artifact, vars)` — routes resolved content to the editor cursor, active terminal (`command` type), or clipboard fallback.
+- `resolveVars(code, vars)` — substitutes `{{PLACEHOLDER}}` tokens; unmatched tokens are left unchanged.
+
+### Parser service (`src/services/parser.service.ts`)
+
+Two exports: `parseArtifactFile(filePath, rootDir)` (sync, reads from disk) and `parseFromContent(content, filePath, rootDir)` (takes a pre-read string — used by the QuickPick picker's async reads). Both extract:
+- **Frontmatter** — YAML block between `---` fences (`type`, `title`, `description`, `language`, `tags`, `env`, `target`).
+- **Code block** — content of the ` ```code ` fenced block, trailing whitespace trimmed.
+- **Vars** — either a ` ```vars ` fenced block (for `type: variables`) or an unfenced `vars:` / `vars` section appearing after the code block.
+
+### Insert commands (`src/commands/insert.command.ts`)
+
+`registerInsertCommands(context)` loops over `ARTIFACTS` and registers **one VS Code command per artifact** — all handled by the same `openArtifactPicker` function. This is architecturally "one insert command" (one loop, one handler, zero hardcoded names) while satisfying a hard VS Code constraint:
+
+> VS Code derives a context-menu item's label **exclusively** from the `title` of the matching `contributes.commands` entry in `package.json`. Per-item title overrides in `contributes.menus` are silently ignored.
+
+Because of this, showing "Insert Snippets", "Insert Templates", etc. as distinct labels requires distinct command IDs. The pattern is `obsidian-artifacts.insert.<dir.toLowerCase()>` — derived by `artifactCommandId(dir)`, which must match the IDs declared in `package.json`.
+
+**Adding a new artifact type:**
+1. Add the entry to `ARTIFACTS` in `src/types/constants.ts` — the handler auto-registers.
+2. Add a matching `contributes.commands` entry in `package.json` with the correct title.
+3. Add `contributes.menus` entries for the relevant context surfaces.
+
+**Variables — special context behaviour:**
+`Variables` has `contexts: ['all']`, so `insert.variables` appears in every context surface (editor, terminal, explorer) and carries the label **"See/Edit Variables"** (not "Insert…") to reflect its browse/edit semantics. In `package.json` it uses group `"2_variables@1"` while all other artifacts use `"1_insert@N"` — VS Code renders different groups with a visual separator, so Variables always appears at the bottom of the submenu, or as a standalone item below other artifacts when only it is active.
+
+**Single entry vs. submenu:**
+Each context surface shows a direct labelled entry for each active artifact when only one is active in that surface (`!obsidian-artifacts.<surface>HasMultiple`), or a collapsed "Obsidian Artifacts" submenu when two or more are active. The `*HasMultiple` context keys are managed by `context.service.ts` and updated whenever the vault configuration changes.
+
+### Vault directory logic (`src/types/constants.ts` + `src/services/vault.service.ts`)
+
+`ARTIFACTS` is the single source of truth for every artifact type. Each entry drives:
+1. Which vault directories are created or detected.
+2. Which VS Code context keys are set (via `context.service.ts`).
+3. Which insert command is registered and where it appears (via `insert.command.ts` + `package.json`).
+
+`default: true` entries (`Snippets`, `AgentsConf`) are auto-created when the vault is first selected. `default: false` entries (`Commands`, `Templates`, `Variables`) are detected but not created automatically.
+
+### No runtime dependencies
+
+Only the VS Code API, Node `fs`, and Node `path` are used — no third-party packages.
+
+---
+
+## Vault File Format
+
+Each artifact is a `.md` file following this structure:
+
+```md
+---
+type: snippet | template | command | agent | variables
+title: Human-readable title
+description: Short explanation
+language: javascript
+tags: [tag1, tag2]
+---
+
+```code
+// Code content — {{PLACEHOLDER}} tokens are replaced at insert time
+const x = {{variableName}};
+```
+
+vars:
+variableName=defaultValue
+anotherVar=
+```
+
+For `type: variables`, the content uses a ` ```vars ` block instead of a ` ```code ` block:
+
+```md
+---
+type: variables
+env: dev
+---
+
+```vars
+API_URL=http://localhost:3000
+DB_URL=mongodb://localhost:27017
+```
+```
+
+---
 
 ## Key Config Files
 
-- `tsconfig.json` — strict mode, `ES2022` target, `Node16` module resolution, `rootDir: "."`, output to `dist/`. `rootDir` is set to project root (not `src/`) so both `src/` and `test/` compile into `dist/src/` and `dist/test/` respectively.
-- `package.json` — `"main": "./dist/src/extension.js"` (mirrors the `rootDir: "."` output structure)
-- `eslint.config.mjs` — enforces naming conventions, curly braces, `===` equality, semicolons
-- `.vscode/launch.json` — debug launch with `--extensionDevelopmentPath`; other extensions disabled in the host; `outFiles` points to `dist/`
-- `.vscode/tasks.json` — `npm watch` is the default build task (runs automatically on F5)
-- `.vscode-test.mjs` — test runner looks for compiled tests at `dist/test/**/*.test.js`
+| File | Purpose |
+|---|---|
+| `tsconfig.json` | Strict mode, `ES2022` target, `Node16` module resolution, `rootDir: "."`, output to `dist/` |
+| `package.json` | `"main": "./dist/src/extension.js"` — mirrors the `rootDir: "."` output path |
+| `eslint.config.mjs` | Enforces naming conventions, curly braces, `===` equality, semicolons |
+| `.vscode/launch.json` | Debug launch with `--extensionDevelopmentPath`; other extensions disabled in the host |
+| `.vscode/tasks.json` | `npm watch` is the default build task (runs automatically on F5) |
+| `.vscode-test.mjs` | Test runner looks for compiled tests at `dist/test/**/*.test.js` |
+
+---
 
 ## VS Code Extension Notes
 
-- `activationEvents` is `[]` in `package.json` — the extension activates on any window open. Update this to specific command activation events when commands stabilise.
-- Compiled output goes to `dist/` and is **gitignored** (`.gitignore` excludes `dist`). Run `npm run compile` after cloning.
+- `activationEvents: []` in `package.json` — the extension activates on every window open. Narrow this to specific command events once commands stabilise.
+- Compiled output goes to `dist/` and is **gitignored**. Run `npm run compile` after cloning.
 - `media/` ships in the packaged extension. `src/`, `test/`, and `dist/test/` are excluded via `.vscodeignore`.
 - All imports use explicit `.js` extensions (e.g. `'./helpers.js'`) — required by `Node16` module resolution even for `.ts` source files.
-- The webview's `localResourceRoots` is set to `extensionUri/media` — any new webview assets must go in `media/`.
+- Webview `localResourceRoots` is restricted to `extensionUri/media` — all webview assets must live in `media/`.
+
+---
+
+## Code Style
+
+### Comments
+- Every function and interface must have a JSDoc block that includes: a concise description, `@param` tags, a `@returns` tag, and at least one `@example`.
+- Add inline section comments (e.g. `// ── Section name ───`) to visually group logical blocks within longer functions.
+- Comments should explain **why**, not **what** — well-named identifiers already describe what the code does.
+
+### File organisation
+- Follow the folder structure defined above.
+- Functions and classes belong in a `services/` or `utils/` file, not in command or panel files.
+- Constants go in `src/types/constants.ts`.
+- Types and interfaces go in `src/types/`.
+- Webview panel logic (HTML generation + message handling) belongs in `src/panels/`.

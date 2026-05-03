@@ -20,14 +20,29 @@
         "title": "Obsidian Artifacts: Settings"
       },
       {
-        "command": "obsidian-artifacts.insert.artifact",
+        "command": "obsidian-artifacts.insert.snippets",
         "category": "Obsidian Artifacts",
-        "title": "Insert Artifact"
+        "title": "Insert Snippets"
       },
       {
-        "command": "obsidian-artifacts.edit.variables",
+        "command": "obsidian-artifacts.insert.agentsconf",
         "category": "Obsidian Artifacts",
-        "title": "Edit/See Variables"
+        "title": "Insert Agents Config"
+      },
+      {
+        "command": "obsidian-artifacts.insert.commands",
+        "category": "Obsidian Artifacts",
+        "title": "Insert Commands"
+      },
+      {
+        "command": "obsidian-artifacts.insert.templates",
+        "category": "Obsidian Artifacts",
+        "title": "Insert Templates"
+      },
+      {
+        "command": "obsidian-artifacts.insert.variables",
+        "category": "Obsidian Artifacts",
+        "title": "See/Edit Variables"
       }
     ],
     "submenus": [
@@ -47,21 +62,17 @@
     "menus": {
       "editor/context": [
         {
-          "command": "obsidian-artifacts.insert.artifact",
-          "args": [{"dir": "Snippets"}],
-          "title": "Obsidian Artifacts: Insert Snippet",
+          "command": "obsidian-artifacts.insert.snippets",
           "when": "obsidian-artifacts.vaultConfigured && obsidian-artifacts.snippetsActive && !obsidian-artifacts.editorHasMultiple",
           "group": "obsidian@1"
         },
         {
-          "command": "obsidian-artifacts.insert.artifact",
-          "args": [{"dir": "Templates"}],
-          "title": "Obsidian Artifacts: Insert Template",
+          "command": "obsidian-artifacts.insert.templates",
           "when": "obsidian-artifacts.vaultConfigured && obsidian-artifacts.templatesActive && !obsidian-artifacts.editorHasMultiple",
           "group": "obsidian@1"
         },
         {
-          "command": "obsidian-artifacts.edit.variables",
+          "command": "obsidian-artifacts.insert.variables",
           "when": "obsidian-artifacts.vaultConfigured && obsidian-artifacts.variablesActive && !obsidian-artifacts.editorHasMultiple",
           "group": "obsidian@1"
         },
@@ -73,14 +84,12 @@
       ],
       "terminal/context": [
         {
-          "command": "obsidian-artifacts.insert.artifact",
-          "args": [{"dir": "Commands"}],
-          "title": "Obsidian Artifacts: Insert Command",
+          "command": "obsidian-artifacts.insert.commands",
           "when": "obsidian-artifacts.vaultConfigured && obsidian-artifacts.commandsActive && !obsidian-artifacts.terminalHasMultiple",
           "group": "obsidian@1"
         },
         {
-          "command": "obsidian-artifacts.edit.variables",
+          "command": "obsidian-artifacts.insert.variables",
           "when": "obsidian-artifacts.vaultConfigured && obsidian-artifacts.variablesActive && !obsidian-artifacts.terminalHasMultiple",
           "group": "obsidian@1"
         },
@@ -92,21 +101,17 @@
       ],
       "explorer/context": [
         {
-          "command": "obsidian-artifacts.insert.artifact",
-          "args": [{"dir": "Templates"}],
-          "title": "Obsidian Artifacts: Insert Template",
+          "command": "obsidian-artifacts.insert.templates",
           "when": "obsidian-artifacts.vaultConfigured && obsidian-artifacts.templatesActive && !obsidian-artifacts.explorerHasMultiple",
           "group": "obsidian@1"
         },
         {
-          "command": "obsidian-artifacts.insert.artifact",
-          "args": [{"dir": "AgentsConf"}],
-          "title": "Obsidian Artifacts: Insert Agents Config",
+          "command": "obsidian-artifacts.insert.agentsconf",
           "when": "obsidian-artifacts.vaultConfigured && obsidian-artifacts.agentsconfActive && !obsidian-artifacts.explorerHasMultiple",
           "group": "obsidian@1"
         },
         {
-          "command": "obsidian-artifacts.edit.variables",
+          "command": "obsidian-artifacts.insert.variables",
           "when": "obsidian-artifacts.vaultConfigured && obsidian-artifacts.variablesActive && !obsidian-artifacts.explorerHasMultiple",
           "group": "obsidian@1"
         },
@@ -118,56 +123,46 @@
       ],
       "obsidian-artifacts.submenu.editor": [
         {
-          "command": "obsidian-artifacts.insert.artifact",
-          "args": [{"dir": "Snippets"}],
-          "title": "Insert Snippet",
+          "command": "obsidian-artifacts.insert.snippets",
           "when": "obsidian-artifacts.snippetsActive",
           "group": "1_insert@1"
         },
         {
-          "command": "obsidian-artifacts.insert.artifact",
-          "args": [{"dir": "Templates"}],
-          "title": "Insert Template",
+          "command": "obsidian-artifacts.insert.templates",
           "when": "obsidian-artifacts.templatesActive",
           "group": "1_insert@2"
         },
         {
-          "command": "obsidian-artifacts.edit.variables",
+          "command": "obsidian-artifacts.insert.variables",
           "when": "obsidian-artifacts.variablesActive",
           "group": "2_variables@1"
         }
       ],
       "obsidian-artifacts.submenu.terminal": [
         {
-          "command": "obsidian-artifacts.insert.artifact",
-          "args": [{"dir": "Commands"}],
-          "title": "Insert Command",
+          "command": "obsidian-artifacts.insert.commands",
           "when": "obsidian-artifacts.commandsActive",
           "group": "1_insert@1"
         },
         {
-          "command": "obsidian-artifacts.edit.variables",
+          "command": "obsidian-artifacts.insert.variables",
           "when": "obsidian-artifacts.variablesActive",
           "group": "2_variables@1"
         }
       ],
       "obsidian-artifacts.submenu.explorer": [
         {
-          "command": "obsidian-artifacts.insert.artifact",
-          "args": [{"dir": "Templates"}],
-          "title": "Insert Template",
+          "command": "obsidian-artifacts.insert.templates",
           "when": "obsidian-artifacts.templatesActive",
           "group": "1_insert@1"
         },
         {
-          "command": "obsidian-artifacts.insert.artifact",
-          "args": [{"dir": "AgentsConf"}],
-          "title": "Insert Agents Config",
+          "command": "obsidian-artifacts.insert.agentsconf",
           "when": "obsidian-artifacts.agentsconfActive",
           "group": "1_insert@2"
         },
         {
-          "command": "obsidian-artifacts.edit.variables",
+          "command": "obsidian-artifacts.insert.variables",
           "when": "obsidian-artifacts.variablesActive",
           "group": "2_variables@1"
         }

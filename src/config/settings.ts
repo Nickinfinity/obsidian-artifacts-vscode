@@ -25,11 +25,39 @@ export function openSettingsPanel(context: vscode.ExtensionContext) {
 		vscode.ViewColumn.One,
 		{
 			enableScripts: true,
-			localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')]
+			localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')],
+			// Preserve the webview's JS and DOM when the user switches to another tab.
+			// Without this, VS Code destroys the webview context on hide and the HTML
+			// reloads from scratch on return — the postMessage with saved config is never
+			// re-sent, so the UI appears empty even though settings are intact.
+			retainContextWhenHidden: true,
 		}
 	);
 
 	panel.webview.html = getWebviewContent(panel.webview, context.extensionUri);
+
+	// ── Restore saved config ──────────────────────────────────────────────────
+	// Reads the current vault path from VS Code settings and sends it to the
+	// webview. Called on initial open AND every time the panel becomes visible
+	// again so any external setting changes (e.g. Settings Sync) are reflected.
+	function postCurrentConfig(): void {
+		const savedPath = vscode.workspace
+			.getConfiguration('obsidianArtifacts')
+			.get<string>('vaultPath', '')
+			.trim();
+
+		if (savedPath) {
+			const detectedDirs = detectVaultDirs(savedPath);
+			panel.webview.postMessage({ command: 'updatePath', path: savedPath, dirs: detectedDirs });
+		}
+	}
+
+	// Re-hydrate the webview whenever it becomes visible (tab switch or initial focus)
+	panel.onDidChangeViewState(({ webviewPanel }) => {
+		if (webviewPanel.visible) {
+			postCurrentConfig();
+		}
+	});
 
 	// Listen for messages from the webview (user interactions)
 	panel.webview.onDidReceiveMessage(async (message) => {
@@ -108,16 +136,8 @@ export function openSettingsPanel(context: vscode.ExtensionContext) {
 		}
 	});
 
-	// On panel open, restore previously saved vault path from VS Code settings
-	const savedPath = vscode.workspace
-		.getConfiguration('obsidianArtifacts')
-		.get<string>('vaultPath', '')
-		.trim();
-
-	if (savedPath) {
-		const detectedDirs = detectVaultDirs(savedPath);
-		panel.webview.postMessage({ command: 'updatePath', path: savedPath, dirs: detectedDirs });
-	}
+	// Send the initial saved config once the panel is open
+	postCurrentConfig();
 }
 
 /**
