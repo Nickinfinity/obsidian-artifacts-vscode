@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { openSettingsPanel } from '../config/settings.js';
+import { openSettingsPanel } from '../ui/panels/settings.panel.js';
 
 /**
  * Registers the `obsidian-artifacts.settings` command.

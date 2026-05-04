@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { getNonce } from '../utils/helpers.js';
-import { validateObsidianVault, detectVaultDirs, createVaultDirectory, deleteVaultDirectory, isDirectoryEmpty } from '../services/vault.service.js';
-import { refreshVaultContext } from '../services/context.service.js';
+import { getNonce } from '../../utils/helpers.js';
+import { validateObsidianVault, detectVaultDirs, createVaultDirectory, deleteVaultDirectory, isDirectoryEmpty } from '../../services/vault.service.js';
+import { refreshVaultContext } from '../../services/context.service.js';
 
 /**
  * Opens the configuration panel webview where users can:
@@ -25,7 +25,7 @@ export function openSettingsPanel(context: vscode.ExtensionContext) {
 		vscode.ViewColumn.One,
 		{
 			enableScripts: true,
-			localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')],
+			localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'src', 'ui')],
 			// Preserve the webview's JS and DOM when the user switches to another tab.
 			// Without this, VS Code destroys the webview context on hide and the HTML
 			// reloads from scratch on return — the postMessage with saved config is never
@@ -166,8 +166,8 @@ export function openSettingsPanel(context: vscode.ExtensionContext) {
 function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri) {
 	// Generate a random nonce for Content Security Policy (prevents inline script injection attacks)
 	const nonce = getNonce();
-	// Load external CSS stylesheet from media folder (loaded as URI for security)
-	const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'styles.css'));
+	// Load external CSS stylesheet from src/ui folder (loaded as URI for security)
+	const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'src', 'ui', 'styles.css'));
 
 	return `<!DOCTYPE html>
 <html lang="en">
@@ -176,11 +176,11 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <!-- Content Security Policy: inline scripts only allowed with matching nonce, styles from webview host -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src ${webview.cspSource};">
-  <!-- Load external stylesheet from extension media folder -->
+  <!-- Load external stylesheet from extension src/ui folder -->
   <link rel="stylesheet" href="${styleUri}">
   <title>Obsidian Artifacts: AI Snippets & Tools - CONFIG</title>
 </head>
-<body>
+<body class="settings-body">
   <div id="webviewContent">
     <!-- Header: extension logo and title -->
     <div class="logo-row">

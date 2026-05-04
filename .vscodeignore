@@ -1,6 +1,7 @@
 .vscode/**
 .vscode-test/**
 src/**
+!src/ui/styles.css
 test/**
 dist/test/**
 .gitignore

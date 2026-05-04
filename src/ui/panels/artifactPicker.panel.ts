@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
-import { parseFromContent } from '../services/parser.service.js';
-import { getNonce } from '../utils/helpers.js';
-import type { ParsedArtifactFile, ParsedVar } from '../types/parsed-artifact.types.js';
+import { parseFromContent } from '../../services/parser.service.js';
+import { getNonce } from '../../utils/helpers.js';
+import type { ParsedArtifactFile, ParsedVar } from '../../types/parsed-artifact.types.js';
 
 /** QuickPick item with optional vault-specific metadata. */
 interface ArtifactItem extends vscode.QuickPickItem {
@@ -24,8 +24,16 @@ const out = vscode.window.createOutputChannel('Obsidian Artifacts');
  * When the user presses Enter on a file, the QuickPick closes, the popup switches
  * to interactive edit mode (editable variable inputs + Insert button), and the
  * extension waits for the user to confirm or cancel inside the panel.
+ *
+ * @param artifactDir  - Vault-relative directory name (e.g. `'Snippets'`).
+ * @param artifactName - Human-readable name shown in the QuickPick title.
+ * @param extensionUri - Extension URI used to resolve the shared CSS stylesheet.
  */
-export async function openArtifactPicker(artifactDir: string, artifactName: string): Promise<void> {
+export async function openArtifactPicker(
+    artifactDir: string,
+    artifactName: string,
+    extensionUri: vscode.Uri
+): Promise<void> {
     const vaultPath = vscode.workspace
         .getConfiguration('obsidianArtifacts')
         .get<string>('vaultPath', '')
@@ -47,7 +55,7 @@ export async function openArtifactPicker(artifactDir: string, artifactName: stri
     }
 
     const targetEditor = vscode.window.activeTextEditor;
-    await new ArtifactNavigator(rootUri, artifactName, targetEditor).run();
+    await new ArtifactNavigator(rootUri, artifactName, targetEditor, extensionUri).run();
 }
 
 // ── ArtifactNavigator ─────────────────────────────────────────────────────────
@@ -57,6 +65,7 @@ class ArtifactNavigator {
     private readonly rootUri: vscode.Uri;
     private readonly artifactName: string;
     private readonly targetEditor: vscode.TextEditor | undefined;
+    private readonly extensionUri: vscode.Uri;
     private readonly parseCache = new Map<string, ParsedArtifactFile>();
     private readonly refreshedUris = new Set<string>();
 
@@ -75,11 +84,22 @@ class ArtifactNavigator {
 
     private lastPreviewedUri = '';
 
-    constructor(rootUri: vscode.Uri, artifactName: string, targetEditor: vscode.TextEditor | undefined) {
+    // Resolved webview URIs for the shared stylesheet — computed once when the
+    // popup panel is first created, then reused for every subsequent HTML render.
+    private cssUri    = '';
+    private cspSource = '';
+
+    constructor(
+        rootUri: vscode.Uri,
+        artifactName: string,
+        targetEditor: vscode.TextEditor | undefined,
+        extensionUri: vscode.Uri
+    ) {
         this.rootUri      = rootUri;
         this.currentDir   = rootUri;
         this.artifactName = artifactName;
         this.targetEditor = targetEditor;
+        this.extensionUri = extensionUri;
 
         this.qp = vscode.window.createQuickPick<ArtifactItem>();
         this.qp.placeholder        = 'Type to filter — Enter to select and edit variables';
@@ -156,12 +176,35 @@ class ArtifactNavigator {
         this.qp.items = items;
         this.qp.busy  = false;
 
+        // Parse all file items in the background so metadata appears immediately.
+        void this.prefetchItems(items);
+
         // Trigger initial preview — onDidChangeActive may not fire automatically
         // when the QuickPick first shows.
         setTimeout(() => {
             const [first] = this.qp.activeItems;
             if (first) { void this.handleActiveChange([first]); }
         }, 60);
+    }
+
+    // ── Background prefetch ───────────────────────────────────────────────────
+
+    /**
+     * Parses all uncached `.md` items in parallel and refreshes their QuickPick
+     * rows as each parse completes — so metadata is visible without the user
+     * needing to navigate to each item first.
+     *
+     * @param items - The full item list for the current directory.
+     */
+    private prefetchItems(items: ArtifactItem[]): void {
+        void Promise.all(
+            items
+                .filter(i => !i.isDirectory && !i.isBack && i.uri && !this.parseCache.has(i.uri.toString()))
+                .map(async i => {
+                    const artifact = await this.getOrParse(i.uri!);
+                    if (artifact) { this.refreshItem(i.uri!, artifact); }
+                })
+        );
     }
 
     // ── Active change → preview mode ──────────────────────────────────────────
@@ -171,7 +214,9 @@ class ArtifactNavigator {
         out.appendLine(`[active] "${item?.label ?? ''}" isDir=${item?.isDirectory} uri=${item?.uri?.fsPath ?? ''}`);
 
         if (!item || item.isBack || item.isDirectory || !item.uri) {
-            if (this.popupPanel) { this.popupPanel.webview.html = renderPopupEmptyHtml(); }
+            if (this.popupPanel) {
+                this.popupPanel.webview.html = renderPopupEmptyHtml(this.cssUri, this.cspSource);
+            }
             return;
         }
 
@@ -184,7 +229,7 @@ class ArtifactNavigator {
         if (key === this.lastPreviewedUri) { return; }
         this.lastPreviewedUri = key;
 
-        this.showPreviewPanel(artifact);
+        await this.showPreviewPanel(artifact);
     }
 
     // ── Parsing & cache ───────────────────────────────────────────────────────
@@ -229,23 +274,36 @@ class ArtifactNavigator {
      * `reveal(column, preserveFocus=true)` brings the column into view while keeping
      * keyboard focus on the QuickPick so the user can keep navigating with arrow keys.
      */
-    private showPreviewPanel(artifact: ParsedArtifactFile): void {
+    private async showPreviewPanel(artifact: ParsedArtifactFile): Promise<void> {
         if (!this.popupPanel) {
             try {
                 this.popupPanel = vscode.window.createWebviewPanel(
                     POPUP_VIEW_TYPE,
                     'Artifact Preview',
                     { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
-                    { enableScripts: true, retainContextWhenHidden: true }
+                    {
+                        enableScripts: true,
+                        retainContextWhenHidden: true,
+                        localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'src', 'ui')],
+                    }
                 );
                 this.popupPanel.onDidDispose(() => { this.popupPanel = undefined; });
+                // Resolve CSS URI once — reused for all subsequent renders.
+                this.cssUri    = this.popupPanel.webview.asWebviewUri(
+                    vscode.Uri.joinPath(this.extensionUri, 'src', 'ui', 'styles.css')
+                ).toString();
+                this.cspSource = this.popupPanel.webview.cspSource;
                 out.appendLine(`[popup] created`);
             } catch (err) {
                 out.appendLine(`[popup] create FAILED: ${(err as Error).message}`);
                 return;
             }
         }
-        this.popupPanel.webview.html = renderPreviewHtml(artifact);
+        const codeRaw = artifact.code.length > MAX_CODE_PREVIEW_CHARS
+            ? artifact.code.slice(0, MAX_CODE_PREVIEW_CHARS) + '\n…'
+            : artifact.code;
+        const codeHtml = await highlightCode(codeRaw, artifact.frontmatter.language);
+        this.popupPanel.webview.html = renderPreviewHtml(artifact, codeHtml, this.cssUri, this.cspSource);
         // reveal() is what makes the panel tab visible in its column.
         this.popupPanel.reveal(this.popupPanel.viewColumn, true /* preserveFocus */);
         out.appendLine(`[popup] preview → ${artifact.fileName}`);
@@ -290,9 +348,17 @@ class ArtifactNavigator {
                     POPUP_VIEW_TYPE,
                     'Artifact Preview',
                     { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
-                    { enableScripts: true, retainContextWhenHidden: true }
+                    {
+                        enableScripts: true,
+                        retainContextWhenHidden: true,
+                        localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'src', 'ui')],
+                    }
                 );
                 this.popupPanel.onDidDispose(() => { this.popupPanel = undefined; });
+                this.cssUri    = this.popupPanel.webview.asWebviewUri(
+                    vscode.Uri.joinPath(this.extensionUri, 'src', 'ui', 'styles.css')
+                ).toString();
+                this.cspSource = this.popupPanel.webview.cspSource;
             } catch (err) {
                 out.appendLine(`[popup] create FAILED in accept: ${(err as Error).message}`);
                 // Fall back to showInputBox
@@ -301,8 +367,14 @@ class ArtifactNavigator {
             }
         }
 
+        // Highlight code via VS Code's markdown renderer for theme-aware syntax colors.
+        const codeRaw = artifact.code.length > MAX_CODE_PREVIEW_CHARS
+            ? artifact.code.slice(0, MAX_CODE_PREVIEW_CHARS) + '\n…'
+            : artifact.code;
+        const codeHtml = await highlightCode(codeRaw, artifact.frontmatter.language);
+
         // Switch to interactive edit mode and bring it into focus.
-        this.popupPanel.webview.html = renderEditHtml(artifact, getNonce());
+        this.popupPanel.webview.html = renderEditHtml(artifact, getNonce(), codeHtml, this.cssUri, this.cspSource);
         this.popupPanel.reveal(this.popupPanel.viewColumn, false /* take focus */);
         out.appendLine(`[popup] edit mode → ${artifact.fileName}`);
 
@@ -336,6 +408,38 @@ class ArtifactNavigator {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
+ * Renders a code block to syntax-highlighted HTML using VS Code's built-in
+ * markdown extension (`markdown.api.render`). The renderer applies highlight.js
+ * tokenisation, producing `<pre><code class="language-X hljs">…spans…</code></pre>`.
+ * Token spans are styled by `.hljs-*` rules in `src/ui/styles.css` against the
+ * active VS Code theme.
+ *
+ * Falls back to a plain escaped `<pre>` when the markdown extension is not
+ * available or the call throws (e.g. unrecognised language).
+ *
+ * @param code - Raw source code to highlight.
+ * @param lang - Language identifier from frontmatter (e.g. `'javascript'`); falls
+ *               back to `'text'` when undefined.
+ * @returns Highlighted HTML (or a plain escaped `<pre>` on failure).
+ *
+ * @example
+ * await highlightCode('const x = 1;', 'javascript')
+ * // → '<pre><code class="language-javascript hljs">…</code></pre>'
+ */
+async function highlightCode(code: string, lang: string | undefined): Promise<string> {
+    if (!code) { return ''; }
+    const language = (lang || 'text').trim();
+    const md       = '```' + language + '\n' + code + '\n```';
+    try {
+        const html = await vscode.commands.executeCommand<string>('markdown.api.render', md);
+        if (typeof html === 'string' && html.trim()) { return html; }
+    } catch (err) {
+        out.appendLine(`[highlight] render failed (${language}): ${(err as Error).message}`);
+    }
+    return `<pre><code class="hljs">${escHtml(code)}</code></pre>`;
+}
+
+/**
  * Returns a Promise that resolves once the popup webview posts an `insert` or
  * `cancel` message. Also resolves null if the panel is disposed before that.
  */
@@ -362,8 +466,17 @@ function waitForEditMessage(panel: vscode.WebviewPanel): Promise<Record<string, 
  * Builds a richly populated `ArtifactItem`.
  *
  * - `label`       — `$(file)  <title>` (filename fallback).
- * - `description` — `[type] language · description` (relative-path fallback).
- * - `detail`      — Tags only; variable info belongs in the popup preview.
+ * - `description` — Parsed description (relative-path fallback when absent).
+ * - `detail`      — `$(symbol-variable) key=val | key=val    $(tag) #tag1 #tag2` (omitted when both empty).
+ *
+ * @param uri      - File or directory URI.
+ * @param isDir    - True when the entry is a directory.
+ * @param fallback - Display name to use before the file is parsed.
+ * @param parsed   - Parsed metadata, or `undefined` if not yet loaded.
+ * @param rootFs   - Absolute filesystem path of the artifact root directory.
+ *
+ * @example
+ * buildItem(uri, false, 'express-route', parsed, '/vault/Snippets')
  */
 function buildItem(
     uri: vscode.Uri,
@@ -376,15 +489,19 @@ function buildItem(
         return { label: `$(folder)  ${fallback}`, uri, isDirectory: true };
     }
 
-    const title    = parsed?.frontmatter.title || fallback;
-    const typePart = parsed ? `[${parsed.frontmatter.type}]` : '';
-    const langPart = parsed?.frontmatter.language ?? '';
-    const descPart = parsed?.frontmatter.description ?? relFsPath(uri, rootFs);
-    const descHead = [typePart, langPart].filter(Boolean).join(' ');
-    const description = descHead ? `${descHead} · ${descPart}` : descPart;
+    const title       = parsed?.frontmatter.title || fallback;
+    const description = parsed?.frontmatter.description || relFsPath(uri, rootFs);
 
-    const tags   = parsed?.frontmatter.tags ?? [];
-    const detail = tags.length ? `$(tag) ${tags.join(', ')}` : undefined;
+    // ── detail: vars then tags, each section prefixed with a codicon ─────────
+    const varsPart = parsed?.vars.length
+        ? `$(symbol-variable)  ${parsed.vars.map(v => `${v.name}=${v.defaultValue}`).join('  |  ')}`
+        : '';
+    const tagsPart = parsed?.frontmatter.tags?.length
+        ? `$(tag)  ${parsed.frontmatter.tags.map(t => `#${t}`).join(' ')}`
+        : '';
+    const detail = varsPart || tagsPart
+        ? [varsPart, tagsPart].filter(Boolean).join('    ')
+        : undefined;
 
     return { label: `$(file)  ${title}`, description, detail, uri, isDirectory: false };
 }
@@ -440,7 +557,22 @@ function resolveVars(code: string, vars: Record<string, string>): string {
 
 // ── Popup HTML: preview mode (read-only) ─────────────────────────────────────
 
-function renderPreviewHtml(a: ParsedArtifactFile): string {
+/**
+ * Renders the read-only artifact preview HTML.
+ *
+ * @param a         - Parsed artifact to display.
+ * @param cssUri    - Webview URI for the shared stylesheet.
+ * @param cspSource - Webview CSP source token (from `webview.cspSource`).
+ *
+ * @example
+ * panel.webview.html = renderPreviewHtml(artifact, cssUri, cspSource);
+ */
+function renderPreviewHtml(
+    a: ParsedArtifactFile,
+    codeHtml: string,
+    cssUri: string,
+    cspSource: string
+): string {
     const e = escHtml;
     const title    = e(a.frontmatter.title || a.fileName);
     const type     = e(a.frontmatter.type);
@@ -449,7 +581,6 @@ function renderPreviewHtml(a: ParsedArtifactFile): string {
     const env      = a.frontmatter.env ? `<span class="pill">env: ${e(a.frontmatter.env)}</span>` : '';
     const target   = a.frontmatter.target ? `<span class="pill">target: ${e(a.frontmatter.target)}</span>` : '';
     const tagsHtml = (a.frontmatter.tags ?? []).map(t => `<span class="tag">${e(t)}</span>`).join('');
-    const codeRaw  = a.code.length > MAX_CODE_PREVIEW_CHARS ? a.code.slice(0, MAX_CODE_PREVIEW_CHARS) + '\n…' : a.code;
     const varsHtml = a.vars.length > 0
         ? `<table class="vt"><thead><tr><th>Variable</th><th>Default</th></tr></thead><tbody>${
             a.vars.map(v => `<tr><td><code>${e(v.name)}</code></td><td class="def">${e(v.defaultValue) || '<em>—</em>'}</td></tr>`).join('')
@@ -465,22 +596,39 @@ function renderPreviewHtml(a: ParsedArtifactFile): string {
     </div>
     ${desc ? `<p class="desc">${desc}</p>` : ''}
     ${tagsHtml ? `<div class="tags">${tagsHtml}</div>` : ''}
-    ${codeRaw ? `<div class="slabel">Content</div><pre class="code">${e(codeRaw)}</pre>` : ''}
+    ${codeHtml ? `<div class="slabel">Content</div>${codeHtml}` : ''}
     <div class="slabel">Variables</div>
     ${varsHtml}
     <p class="path">${e(a.relativePath)}</p>
-    <p class="hint">Press Enter in the file list to edit variables and insert.</p>`);
+    <p class="hint">Press Enter in the file list to edit variables and insert.</p>`,
+    cssUri, cspSource);
 }
 
 // ── Popup HTML: edit mode (interactive) ──────────────────────────────────────
 
-function renderEditHtml(a: ParsedArtifactFile, nonce: string): string {
+/**
+ * Renders the interactive variable-editing HTML for a selected artifact.
+ *
+ * @param a         - Parsed artifact to edit.
+ * @param nonce     - CSP nonce for the inline script.
+ * @param cssUri    - Webview URI for the shared stylesheet.
+ * @param cspSource - Webview CSP source token (from `webview.cspSource`).
+ *
+ * @example
+ * panel.webview.html = renderEditHtml(artifact, getNonce(), cssUri, cspSource);
+ */
+function renderEditHtml(
+    a: ParsedArtifactFile,
+    nonce: string,
+    codeHtml: string,
+    cssUri: string,
+    cspSource: string
+): string {
     const e = escHtml;
     const title = e(a.frontmatter.title || a.fileName);
     const type  = e(a.frontmatter.type);
     const lang  = a.frontmatter.language ? e(a.frontmatter.language) : '';
     const desc  = a.frontmatter.description ? e(a.frontmatter.description) : '';
-    const codeRaw = a.code.length > MAX_CODE_PREVIEW_CHARS ? a.code.slice(0, MAX_CODE_PREVIEW_CHARS) + '\n…' : a.code;
 
     const inputsHtml = a.vars.length > 0
         ? `<div class="slabel">Variables</div>
@@ -498,49 +646,17 @@ function renderEditHtml(a: ParsedArtifactFile, nonce: string): string {
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
-${popupStyles()}
-<style>
-.inputs { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
-.input-row { display: flex; align-items: center; gap: 10px; }
-.input-row label { min-width: 110px; flex-shrink: 0; font-size: 12px; }
-.input-row label code { font-family: var(--vscode-editor-font-family, monospace); }
-.input-row input {
-  flex: 1; padding: 5px 8px;
-  background: var(--vscode-input-background);
-  color: var(--vscode-input-foreground);
-  border: 1px solid var(--vscode-input-border, transparent);
-  border-radius: 3px; font-size: 12px;
-  font-family: var(--vscode-editor-font-family, monospace);
-  outline: none;
-}
-.input-row input:focus { border-color: var(--vscode-focusBorder); }
-.actions { display: flex; gap: 8px; margin-top: 4px; }
-.btn {
-  padding: 6px 16px; border: none; border-radius: 3px;
-  font-size: 12px; cursor: pointer; font-family: var(--vscode-font-family);
-}
-.btn-insert {
-  background: var(--vscode-button-background);
-  color: var(--vscode-button-foreground);
-}
-.btn-insert:hover { background: var(--vscode-button-hoverBackground); }
-.btn-cancel {
-  background: var(--vscode-button-secondaryBackground, transparent);
-  color: var(--vscode-button-secondaryForeground, var(--vscode-editor-foreground));
-  border: 1px solid var(--vscode-panel-border);
-}
-.btn-cancel:hover { background: var(--vscode-list-hoverBackground); }
-</style>
+      content="default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}';">
+<link rel="stylesheet" href="${cssUri}">
 </head>
-<body>
+<body class="popup-body">
   <h1>${title}</h1>
   <div class="badges">
     <span class="badge">${type}</span>
     ${lang ? `<span class="badge lang">${lang}</span>` : ''}
   </div>
   ${desc ? `<p class="desc">${desc}</p>` : ''}
-  ${codeRaw ? `<div class="slabel">Content</div><pre class="code">${e(codeRaw)}</pre>` : ''}
+  ${codeHtml ? `<div class="slabel">Content</div>${codeHtml}` : ''}
   ${inputsHtml}
   <div class="actions">
     <button class="btn btn-insert" id="insertBtn">Insert</button>
@@ -576,67 +692,39 @@ ${popupStyles()}
 
 // ── Popup HTML: empty state ───────────────────────────────────────────────────
 
-function renderPopupEmptyHtml(): string {
-    return popupShell('<p style="text-align:center;margin-top:40px">Select a file to preview</p>');
+function renderPopupEmptyHtml(cssUri: string, cspSource: string): string {
+    return popupShell(
+        '<p style="text-align:center;margin-top:40px">Select a file to preview</p>',
+        cssUri,
+        cspSource
+    );
 }
 
-// ── Popup HTML shared shell + styles ─────────────────────────────────────────
+// ── Popup HTML shared shell ───────────────────────────────────────────────────
 
-function popupShell(body: string): string {
+/**
+ * Wraps popup body content in a complete HTML document that loads the shared stylesheet.
+ *
+ * @param body      - Inner HTML to place inside `<body>`.
+ * @param cssUri    - Webview URI for the shared stylesheet.
+ * @param cspSource - Webview CSP source token; falls back to `'unsafe-inline'` before
+ *                    the panel is created (e.g. for the initial empty-state render).
+ *
+ * @example
+ * return popupShell('<p>Hello</p>', cssUri, cspSource);
+ */
+function popupShell(body: string, cssUri: string, cspSource: string): string {
+    const styleSrc = cspSource || "'unsafe-inline'";
+    const linkTag  = cssUri ? `<link rel="stylesheet" href="${cssUri}">` : '';
     return /* html */`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
-${popupStyles()}
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${styleSrc};">
+${linkTag}
 </head>
-<body>${body}</body>
+<body class="popup-body">${body}</body>
 </html>`;
-}
-
-function popupStyles(): string {
-    return /* html */`<style>
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  font-family: var(--vscode-font-family); font-size: 13px; line-height: 1.5;
-  color: var(--vscode-editor-foreground); background: var(--vscode-editor-background);
-  padding: 16px 18px 24px;
-}
-h1 { font-size: 17px; font-weight: 600; margin-bottom: 8px; line-height: 1.3; }
-.badges { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
-.badge {
-  padding: 2px 9px; border-radius: 12px; font-size: 10px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.5px;
-  background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
-}
-.badge.lang {
-  background: transparent; color: var(--vscode-descriptionForeground);
-  border: 1px solid var(--vscode-panel-border);
-}
-.pill {
-  font-size: 11px; color: var(--vscode-descriptionForeground);
-  border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 1px 7px;
-}
-.desc { color: var(--vscode-descriptionForeground); margin-bottom: 10px; }
-.tags { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 12px; }
-.tag { font-size: 11px; padding: 2px 7px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; color: var(--vscode-descriptionForeground); }
-.slabel { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: var(--vscode-descriptionForeground); margin: 14px 0 6px; }
-.code {
-  background: var(--vscode-textCodeBlock-background, var(--vscode-sideBar-background));
-  border: 1px solid var(--vscode-panel-border); border-radius: 4px;
-  padding: 10px 12px; font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
-  max-height: 220px; overflow-y: auto; margin-bottom: 4px;
-}
-.vt { width: 100%; border-collapse: collapse; font-size: 12px; }
-.vt th { text-align: left; padding: 4px 8px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--vscode-panel-border); }
-.vt td { padding: 5px 8px; border-bottom: 1px solid var(--vscode-panel-border); }
-.vt code { font-family: var(--vscode-editor-font-family, monospace); }
-.def { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family, monospace); }
-.muted { color: var(--vscode-descriptionForeground); font-style: italic; font-size: 12px; margin-top: 6px; }
-.path { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 14px; font-family: var(--vscode-editor-font-family, monospace); opacity: 0.6; }
-.hint { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 6px; opacity: 0.7; font-style: italic; }
-</style>`;
 }
 
 function escHtml(s: string): string {
