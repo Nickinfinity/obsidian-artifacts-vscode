@@ -47,24 +47,28 @@ function parseFrontmatter(content: string): ParsedFrontmatter {
 }
 
 /**
- * Extracts the content of the ` ```code ` fenced block from a vault file.
+ * Extracts the first fenced code block from a vault file, along with its language tag.
  *
  * The frontmatter section is stripped first to prevent false matches.
  * Trailing whitespace is removed so the inserted content does not carry an
  * unwanted trailing newline into the editor.
  *
  * @param content - Full UTF-8 string content of the `.md` file.
- * @returns Code block body as a trimmed string, or `''` if no ` ```code ` block is found.
+ * @returns `{ code, fenceLang }` — code is `''` and fenceLang is `undefined` when no fence is found.
  *
  * @example
- * parseCodeBlock('---\ntype: snippet\n---\n\n```code\nconsole.log("hi");\n```')
- * // → 'console.log("hi");'
+ * parseCodeBlock('---\ntype: snippet\n---\n\n```javascript\nconsole.log("hi");\n```')
+ * // → { code: 'console.log("hi");', fenceLang: 'javascript' }
  */
-function parseCodeBlock(content: string): string {
+function parseCodeBlock(content: string): { code: string; fenceLang?: string } {
     // Strip frontmatter before scanning to avoid matching a fence inside it
     const afterFrontmatter = content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
-    const match = /```code\r?\n([\s\S]*?)```/.exec(afterFrontmatter);
-    return match ? match[1].trimEnd() : '';
+    const match = /```(\w*)\r?\n([\s\S]*?)```/.exec(afterFrontmatter);
+    if (!match) { return { code: '' }; }
+    return {
+        code:     match[2].trimEnd(),
+        fenceLang: match[1] || undefined,
+    };
 }
 
 /**
@@ -108,7 +112,7 @@ function parseVarLines(raw: string): ParsedVar[] {
  * // → [{ name: 'API_URL', defaultValue: 'http://localhost' }]
  *
  * // Unfenced format (snippet / command / template)
- * parseVars('...\n```code\n...\n```\n\nvars:\nroute=/test\n')
+ * parseVars('...\n```javascript\n...\n```\n\nvars:\nroute=/test\n')
  * // → [{ name: 'route', defaultValue: '/test' }]
  */
 function parseVars(content: string): ParsedVar[] {
@@ -119,7 +123,7 @@ function parseVars(content: string): ParsedVar[] {
     // Priority 2: unfenced section after the code block ("vars:" or "vars" label)
     const afterCode = content
         .replace(/^---[\s\S]*?---/, '')     // strip frontmatter
-        .replace(/```code[\s\S]*?```/, ''); // strip code block
+        .replace(/```\w*[\s\S]*?```/, ''); // strip code block
     const unfenced = /\bvars:?\s*\r?\n([\s\S]+?)(?:\n\n|\n*$)/.exec(afterCode);
     if (unfenced) { return parseVarLines(unfenced[1]); }
 
@@ -166,12 +170,15 @@ function parseVars(content: string): ParsedVar[] {
  * parseFromContent(content, uri.fsPath, rootUri.fsPath);
  */
 export function parseFromContent(content: string, filePath: string, artifactRootDir: string): ParsedArtifactFile {
+    const frontmatter = parseFrontmatter(content);
+    const { code, fenceLang } = parseCodeBlock(content);
+    if (!frontmatter.language && fenceLang) { frontmatter.language = fenceLang; }
     return {
         filePath,
         fileName:     path.basename(filePath, '.md'),
         relativePath: path.relative(artifactRootDir, filePath),
-        frontmatter:  parseFrontmatter(content),
-        code:         parseCodeBlock(content),
+        frontmatter,
+        code,
         vars:         parseVars(content),
     };
 }
@@ -179,12 +186,15 @@ export function parseFromContent(content: string, filePath: string, artifactRoot
 export function parseArtifactFile(filePath: string, artifactRootDir: string): ParsedArtifactFile | null {
     try {
         const content = fs.readFileSync(filePath, 'utf-8');
+        const frontmatter = parseFrontmatter(content);
+        const { code, fenceLang } = parseCodeBlock(content);
+        if (!frontmatter.language && fenceLang) { frontmatter.language = fenceLang; }
         return {
             filePath,
             fileName:     path.basename(filePath, '.md'),
             relativePath: path.relative(artifactRootDir, filePath),
-            frontmatter:  parseFrontmatter(content),
-            code:         parseCodeBlock(content),
+            frontmatter,
+            code,
             vars:         parseVars(content),
         };
     } catch {
