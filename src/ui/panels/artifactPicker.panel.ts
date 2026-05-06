@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { parseFromContent, resolveVars } from '../../services/parser.service.js';
+import { renderCodeHtml } from '../../services/render.service.js';
 import { getNonce } from '../../utils/helpers.js';
 import type { ParsedArtifactFile, ParsedBlock, ParsedVar } from '../../types/parsed-artifact.types.js';
 
@@ -12,9 +13,8 @@ interface ArtifactItem extends vscode.QuickPickItem {
     block?: ParsedBlock;
 }
 
-const POPUP_VIEW_TYPE        = 'obsidianArtifactPopupPreview';
-const PREVIEW_DEBOUNCE_MS    = 120;
-const MAX_CODE_PREVIEW_CHARS = 1200;
+const POPUP_VIEW_TYPE     = 'obsidianArtifactPopupPreview';
+const PREVIEW_DEBOUNCE_MS = 120;
 
 const out = vscode.window.createOutputChannel('Obsidian Artifacts');
 
@@ -331,18 +331,12 @@ class ArtifactNavigator {
             }
         }
 
-        // Highlight all block code sections in parallel.
-        const highlightedBlocks = await Promise.all(
-            artifact.blocks.map(async b => ({
-                heading: b.heading,
-                codeHtml: await highlightCode(
-                    b.code.length > MAX_CODE_PREVIEW_CHARS ? b.code.slice(0, MAX_CODE_PREVIEW_CHARS) + '\n…' : b.code,
-                    b.fenceLang ?? artifact.frontmatter.language
-                ),
-                vars: b.vars,
-                description: b.description,
-            }))
-        );
+        const highlightedBlocks = artifact.blocks.map(b => ({
+            heading:     b.heading,
+            codeHtml:    renderCodeHtml(b.code, b.fenceLang ?? artifact.frontmatter.language),
+            vars:        b.vars,
+            description: b.description,
+        }));
 
         this.popupPanel.webview.html = renderMultiBlockPreviewHtml(artifact, highlightedBlocks, this.cssUri, this.cspSource);
         this.popupPanel.reveal(this.popupPanel.viewColumn, true /* preserveFocus */);
@@ -416,10 +410,7 @@ class ArtifactNavigator {
                 return;
             }
         }
-        const codeRaw = artifact.code.length > MAX_CODE_PREVIEW_CHARS
-            ? artifact.code.slice(0, MAX_CODE_PREVIEW_CHARS) + '\n…'
-            : artifact.code;
-        const codeHtml = await highlightCode(codeRaw, artifact.frontmatter.language);
+        const codeHtml = renderCodeHtml(artifact.code, artifact.frontmatter.language);
         this.popupPanel.webview.html = renderPreviewHtml(artifact, codeHtml, this.cssUri, this.cspSource);
         // reveal() is what makes the panel tab visible in its column.
         this.popupPanel.reveal(this.popupPanel.viewColumn, true /* preserveFocus */);
@@ -522,10 +513,7 @@ class ArtifactNavigator {
             ? { ...artifact, code, vars: editVars }
             : artifact;
 
-        const codeRaw  = code.length > MAX_CODE_PREVIEW_CHARS
-            ? code.slice(0, MAX_CODE_PREVIEW_CHARS) + '\n…'
-            : code;
-        const codeHtml = await highlightCode(codeRaw, artifact.frontmatter.language);
+        const codeHtml = renderCodeHtml(code, artifact.frontmatter.language);
 
         this.popupPanel.webview.html = renderEditHtml(editArtifact, getNonce(), codeHtml, this.cssUri, this.cspSource);
         this.popupPanel.reveal(this.popupPanel.viewColumn, false /* take focus */);
@@ -558,38 +546,6 @@ class ArtifactNavigator {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-/**
- * Renders a code block to syntax-highlighted HTML using VS Code's built-in
- * markdown extension (`markdown.api.render`). The renderer applies highlight.js
- * tokenisation, producing `<pre><code class="language-X hljs">…spans…</code></pre>`.
- * Token spans are styled by `.hljs-*` rules in `src/ui/styles.css` against the
- * active VS Code theme.
- *
- * Falls back to a plain escaped `<pre>` when the markdown extension is not
- * available or the call throws (e.g. unrecognised language).
- *
- * @param code - Raw source code to highlight.
- * @param lang - Language identifier from frontmatter (e.g. `'javascript'`); falls
- *               back to `'text'` when undefined.
- * @returns Highlighted HTML (or a plain escaped `<pre>` on failure).
- *
- * @example
- * await highlightCode('const x = 1;', 'javascript')
- * // → '<pre><code class="language-javascript hljs">…</code></pre>'
- */
-async function highlightCode(code: string, lang: string | undefined): Promise<string> {
-    if (!code) { return ''; }
-    const language = (lang || 'text').trim();
-    const md       = '```' + language + '\n' + code + '\n```';
-    try {
-        const html = await vscode.commands.executeCommand<string>('markdown.api.render', md);
-        if (typeof html === 'string' && html.trim()) { return html; }
-    } catch (err) {
-        out.appendLine(`[highlight] render failed (${language}): ${(err as Error).message}`);
-    }
-    return `<pre><code class="hljs">${escHtml(code)}</code></pre>`;
-}
 
 /**
  * Returns a Promise that resolves once the popup webview posts an `insert` or

@@ -91,7 +91,15 @@ test/
 - `handleActiveChange(items)` — fires (debounced 150 ms) on `onDidChangeActive`. Block item → preview via `blockAsArtifact` adapter. Multi-block file (`blocks.length > 1`) → `showMultiBlockPreviewPanel`. Otherwise → `showPreviewPanel`.
 - `handleAccept()` — directory → `loadDir`; multi-block file → `loadBlocks`; block item → `openEditMode(parent, block.code, block.vars)`; single-block file → `openEditMode(artifact)`.
 - `openEditMode(artifact, codeOverride?, varsOverride?)` — ensures popup panel exists, renders `renderEditHtml`, waits for Insert/Cancel message. Overrides let a block's code/vars be shown while `artifact.frontmatter.type` drives command-vs-snippet routing.
-- `showMultiBlockPreviewPanel(artifact)` — highlights all blocks in parallel via `Promise.all(blocks.map(...highlightCode))`, renders `renderMultiBlockPreviewHtml`.
+- `showMultiBlockPreviewPanel(artifact)` — renders all blocks via `renderCodeHtml`, builds `highlightedBlocks` array (sync), renders `renderMultiBlockPreviewHtml`.
+
+**Code preview rendering (`src/services/render.service.ts`):**
+- All code previews use `renderCodeHtml(code, fenceLang?)` — never the old async `highlightCode` / `markdown.api.render` path.
+- Output structure: `<div class="code-block-wrapper">` → one `<div class="code-line-row">` per line → `<span class="line-number">` + `<span class="code-content">`. The `code-line-row` class satisfies both the `code-line` and `code-line-row` CSS selectors; no separate `code-line` span exists.
+- Line numbers use `.line-number` (`user-select: none; opacity: 0.5`). Lines use `white-space: pre-wrap; word-break: break-all` — no horizontal scroll.
+- `<VK-xxx>` tokens are wrapped in `<span class="vk-var">` as a post-pass after syntax highlighting. Tokens are protected from hljs splitting via identifier placeholders (`__VK0__`) before the hljs pass, then restored as `vk-var` spans after.
+- `.vk-var` — orange accent (`var(--vscode-charts-orange, #e8a64a)`), bold, subtle background — applied via `src/ui/styles.css`.
+- All preview colors use VS Code CSS variables (`--vscode-editor-font-family`, `--vscode-editorLineNumber-foreground`, `--vscode-charts-orange`, etc.) for automatic light/dark theme compatibility.
 
 **Module-level helpers:**
 - `blockAsArtifact(block, parent)` — adapts a `ParsedBlock` into a `ParsedArtifactFile` shape for preview/insert; inherits parent frontmatter, overrides `title`, `description`, `language`, `code`, `vars`.

@@ -17,7 +17,12 @@
       "Bash(env)",
       "Bash(find ~ -name \"*.json\" -path \"*claude*\" 2>/dev/null | grep -v \"session\\\\|history\\\\|telemetry\\\\|cache\\\\|jsonl\" | head -20)",
       "Read(//Users/nick/**)",
-      "mcp__atlassian__createJiraIssue"
+      "mcp__atlassian__createJiraIssue",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); deps={**d.get\\('dependencies',{}\\),**d.get\\('devDependencies',{}\\)}; print\\('\\\\n'.join\\(f'{k}: {v}' for k,v in deps.items\\(\\)\\)\\)\")",
+      "Bash(pnpm add *)",
+      "Bash(node -e \"const hljs = require\\('highlight.js'\\); const r = hljs.highlight\\('const x = 1;', {language:'javascript'}\\); console.log\\(r.value.substring\\(0,120\\)\\)\")",
+      "Bash(node -e ' *)",
+      "Bash(node -e \"const hljs = require\\('highlight.js'\\); console.log\\(typeof hljs.highlight\\)\")"
     ]
   }
 }
