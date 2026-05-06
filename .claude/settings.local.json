@@ -10,7 +10,14 @@
       "Bash(nvim --version)",
       "Bash(git -C /home/nick/.config/nvim status)",
       "Bash(git *)",
-      "Bash(nvim *)"
+      "Bash(nvim *)",
+      "Read(//Users/nick/.claude/projects/**)",
+      "Read(//Users/nick/.claude/**)",
+      "Bash(python3 -m json.tool)",
+      "Bash(env)",
+      "Bash(find ~ -name \"*.json\" -path \"*claude*\" 2>/dev/null | grep -v \"session\\\\|history\\\\|telemetry\\\\|cache\\\\|jsonl\" | head -20)",
+      "Read(//Users/nick/**)",
+      "mcp__atlassian__createJiraIssue"
     ]
   }
 }
