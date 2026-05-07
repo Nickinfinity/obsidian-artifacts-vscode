@@ -23,7 +23,8 @@
       "Bash(node -e \"const hljs = require\\('highlight.js'\\); const r = hljs.highlight\\('const x = 1;', {language:'javascript'}\\); console.log\\(r.value.substring\\(0,120\\)\\)\")",
       "Bash(node -e ' *)",
       "Bash(node -e \"const hljs = require\\('highlight.js'\\); console.log\\(typeof hljs.highlight\\)\")",
-      "mcp__atlassian__getAccessibleAtlassianResources"
+      "mcp__atlassian__getAccessibleAtlassianResources",
+      "mcp__atlassian__searchJiraIssuesUsingJql"
     ]
   }
 }

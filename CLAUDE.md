@@ -24,7 +24,7 @@ Press **F5** in VS Code to launch the Extension Development Host.
 The current feature set:
 
 - **Config page** — a webview panel where the user selects their Obsidian vault root, validates it, and enables or disables artifact directories.
-- **Artifact picker** — a `vscode.QuickPick`-based hierarchical navigator that opens when the user triggers an insert command. The user navigates subfolders, selects a `.md` file (with a live side-by-side editor preview), fills in any `<VK-xxx>` variable values via `showInputBox`, and the resolved content is injected at the cursor (or into the terminal for `command`-type artifacts).
+- **Artifact picker** — a `vscode.QuickPick`-based hierarchical navigator that opens when the user triggers an insert command. The user navigates subfolders, selects a `.md` file. A side-by-side **interactive preview panel** shows the parsed metadata, an editable code area (with line numbers, syntax highlighting, and `<VK-xxx>` token spans), and variable input fields. The user fills in variable values and clicks **Insert** — resolved content is injected at the cursor or sent to the terminal. An **Edit .md** button opens the real vault file in a VS Code editor tab for permanent changes.
 
 ---
 
@@ -39,7 +39,11 @@ src/
 ├── services/
 │   ├── vault.service.ts              # validateObsidianVault(), detectVaultDirs(), createVaultDirectory()
 │   ├── context.service.ts            # setVaultContextKeys(), refreshVaultContext()
-│   └── parser.service.ts             # parseArtifactFile(), parseFromContent(), parseBlocks(), extractVars(), resolveVars()
+│   ├── parser.service.ts             # parseArtifactFile(), parseFromContent(), parseBlocks(), extractVars(), resolveVars()
+│   ├── render.service.ts             # renderCodeHtml(), renderCodeRowsHtml(), renderLineHtml()
+│   ├── artifact-patcher.service.ts   # patchFrontmatterField(), patchVarDefaults()
+│   ├── preview-mode.service.ts       # PreviewModeController — mode state + section editing
+│   └── temp-document.service.ts     # TempDocument — scratch VS Code editor tab for full edit
 ├── ui/
 │   ├── panels/
 │   │   ├── artifactPicker.panel.ts   # Artifact picker (QuickPick navigator + popup webview)
@@ -48,13 +52,17 @@ src/
 ├── types/
 │   ├── constants.ts                  # ARTIFACTS — master list of artifact directories
 │   ├── artifact.types.ts             # Artifact, ArtifactContext, ArtifactsArray interfaces
-│   └── parsed-artifact.types.ts     # ParsedArtifactFile, ParsedBlock, ParsedFrontmatter, ParsedVar, VaultEntry
+│   ├── parsed-artifact.types.ts     # ParsedArtifactFile, ParsedBlock, ParsedFrontmatter, ParsedVar, VaultEntry
+│   └── webview-messages.types.ts    # Typed message shapes exchanged between extension and webviews
 ├── utils/
 │   └── helpers.ts                    # getNonce() for CSP nonces
 ├── features/                         # (empty) reserved for future domain features
 └── providers/                        # (empty) reserved for future VS Code providers
 test/
-└── extension.test.ts                 # Mocha test suite
+├── extension.test.ts                 # Mocha test suite
+├── artifact-patcher.test.ts          # Unit tests for artifact-patcher.service
+├── preview-modes.test.ts             # Unit tests for preview-mode.service
+└── temp-document.test.ts             # Unit tests for temp-document.service
 ```
 
 ---
@@ -88,14 +96,23 @@ test/
 - Maintains a `dirStack` (parent URIs) and `currentDir` for hierarchical navigation.
 - `loadDir(uri)` — reads the directory with `vscode.workspace.fs.readDirectory`, builds items with `$(folder)` / `$(file)` codicons, and updates the QuickPick title to show the breadcrumb path.
 - `loadBlocks(artifact)` — replaces QuickPick items with one entry per `ParsedBlock`; pushes `currentDir` onto `dirStack` so the `..` back item works. Sets `currentArtifact` for preview/insert use.
-- `handleActiveChange(items)` — fires (debounced 150 ms) on `onDidChangeActive`. Block item → preview via `blockAsArtifact` adapter. Multi-block file (`blocks.length > 1`) → `showMultiBlockPreviewPanel`. Otherwise → `showPreviewPanel`.
-- `handleAccept()` — directory → `loadDir`; multi-block file → `loadBlocks`; block item → `openEditMode(parent, block.code, block.vars)`; single-block file → `openEditMode(artifact)`.
-- `openEditMode(artifact, codeOverride?, varsOverride?)` — ensures popup panel exists, renders `renderEditHtml`, waits for Insert/Cancel message. Overrides let a block's code/vars be shown while `artifact.frontmatter.type` drives command-vs-snippet routing.
-- `showMultiBlockPreviewPanel(artifact)` — renders all blocks via `renderCodeHtml`, builds `highlightedBlocks` array (sync), renders `renderMultiBlockPreviewHtml`.
+- `handleActiveChange(items)` — fires (debounced 150 ms) on `onDidChangeActive`. Block item → preview via `blockAsArtifact` adapter. Multi-block file (`blocks.length > 1`) → `showMultiBlockPreviewPanel`. Otherwise → `showPreviewPanel` (read-only preview while navigating).
+- `handleAccept()` — directory → `loadDir`; multi-block file → `loadBlocks`; block or single-block file → `keepPopupOnHide = true`, hide QuickPick, call `showPreviewPanel`, then `reveal(false)` to focus the panel. The QuickPick closes; the popup switches to interactive edit mode.
+- `showPreviewPanel(artifact)` — ensures popup panel exists with `enableScripts: true`. Renders interactive HTML via `renderPreviewHtml` using `renderCodeRowsHtml` for the code area. Sends `{ command: 'switchMode', mode: 'edit' }` to the webview after file selection so the panel becomes interactive.
+- `showMultiBlockPreviewPanel(artifact)` — renders all blocks via `renderCodeHtml`, builds `highlightedBlocks` array (sync), renders `renderMultiBlockPreviewHtml`. Panel created with `enableScripts: true`.
+- `handleInsert(msg, artifact)` — reads edited code from the webview message, resolves `<VK-xxx>` tokens using a three-tier fallback: user-typed value → `v.defaultValue` → leave token unchanged. Calls `performInsert`.
+- `handleFullEdit(artifact)` — opens the real vault `.md` file in a VS Code editor tab via `vscode.workspace.openTextDocument`. Saves write directly to disk. The popup panel remains open.
+
+**Popup webview interactive mode (preview HTML script):**
+- Code area is a `<div class="code-block-wrapper editable" contenteditable="true">` with per-line `<span class="line-number" contenteditable="false">` spans so line numbers cannot be edited.
+- On `input`, debounces 150 ms then re-renders highlighted rows via the extension (posts `{ command: 'codeChanged', code }` and receives `{ command: 'updateRows', html }`), preserving caret position via text-node offset walking.
+- Paste intercepted to strip HTML formatting; Enter intercepted to insert `\n` via `document.execCommand`.
+- When new vars are detected (`updateVars` message), input fields are rebuilt preserving already-typed values.
+- `fileUpdated` message from extension re-renders the code area and var fields (after save from full edit mode).
 
 **Code preview rendering (`src/services/render.service.ts`):**
-- All code previews use `renderCodeHtml(code, fenceLang?)` — never the old async `highlightCode` / `markdown.api.render` path.
-- Output structure: `<div class="code-block-wrapper">` → one `<div class="code-line-row">` per line → `<span class="line-number">` + `<span class="code-content">`. The `code-line-row` class satisfies both the `code-line` and `code-line-row` CSS selectors; no separate `code-line` span exists.
+- Two export variants: `renderCodeHtml(code, fenceLang?)` returns a full `<div class="code-block-wrapper">…</div>` block; `renderCodeRowsHtml(code, fenceLang?)` returns only the inner rows (no wrapper). Use `renderCodeRowsHtml` when the caller supplies its own wrapper element (e.g. the editable code area in the preview panel) to avoid double-nesting.
+- Output structure: one `<div class="code-line-row">` per line → `<span class="line-number" contenteditable="false">` + `<span class="code-content">`. Line numbers have `contenteditable="false"` so they cannot be edited when the wrapper is `contenteditable="true"`.
 - Line numbers use `.line-number` (`user-select: none; opacity: 0.5`). Lines use `white-space: pre-wrap; word-break: break-all` — no horizontal scroll.
 - `<VK-xxx>` tokens are wrapped in `<span class="vk-var">` as a post-pass after syntax highlighting. Tokens are protected from hljs splitting via identifier placeholders (`__VK0__`) before the hljs pass, then restored as `vk-var` spans after.
 - `.vk-var` — orange accent (`var(--vscode-charts-orange, #e8a64a)`), bold, subtle background — applied via `src/ui/styles.css`.
@@ -103,9 +120,17 @@ test/
 
 **Module-level helpers:**
 - `blockAsArtifact(block, parent)` — adapts a `ParsedBlock` into a `ParsedArtifactFile` shape for preview/insert; inherits parent frontmatter, overrides `title`, `description`, `language`, `code`, `vars`.
-- `resolveVarsInteractive(vars)` — shows a `showInputBox` for each variable; returns `null` if the user cancels any box.
 - `performInsert(editor, artifact, vars)` — routes resolved content to the editor cursor, active terminal (`command` type), or clipboard fallback.
 - `resolveVars(code, vars)` — substitutes `<VK-xxx>` tokens from the map; unmatched tokens are left unchanged.
+
+**QuickPick variable display:**
+- Variable names in QuickPick item descriptions strip the `VK-` prefix — e.g. `host` is shown instead of `VK-host`. The full `VK-` prefixed name is still used internally for substitution.
+
+**Variable default value fallback:**
+- In `handleInsert`, collected user input is resolved with a three-tier fallback:
+  1. User-typed value (non-empty string) → used as-is.
+  2. `v.defaultValue` (from the `vars:` section or auto-detected) → used if user left the field blank.
+  3. Neither → token is left unchanged in the inserted code (i.e. `<VK-xxx>` is kept literally).
 
 ### Parser service (`src/services/parser.service.ts`)
 
@@ -149,20 +174,31 @@ Only the VS Code API, Node `fs`, and Node `path` are used — no third-party pac
 
 ---
 
-## Edit Mode — Two-Panel Layout
+## Interactive Preview Panel
 
-When the user selects an artifact, edit mode opens two panels side by side:
+When the user presses Enter on a file in the QuickPick, the picker closes and the popup webview becomes the primary interaction surface:
 
-- **Right** — a real VS Code editor tab containing the artifact's code, created via `TempDocument` (`src/services/temp-document.service.ts`). The document is opened with `vscode.workspace.openTextDocument({ content, language })` so the full language server (syntax highlighting, IntelliSense, formatting) is active.
-- **Left** — a webview panel (`ViewColumn.One`) showing the artifact's title, type/language badges, description, VK var input fields, and **Insert** / **Cancel** buttons. No code preview — the real editor is the source of truth for code.
+- **Code area** — `<div class="code-block-wrapper editable" contenteditable="true">` with line numbers, syntax highlighting (hljs), and `<VK-xxx>` token spans. The user can type or paste directly. Line number spans are `contenteditable="false"` so they cannot be edited accidentally.
+- **Variable inputs** — one `<input>` per `<VK-xxx>` token, labelled with the hint (no `VK-` prefix). Default values from the `vars:` section pre-fill each input.
+- **Three buttons:**
+  - **Insert** — resolves variables (user input → default → leave token) and calls `performInsert`.
+  - **Edit .md** — opens the raw vault `.md` file in a real VS Code editor tab. Saving that file triggers a `fileUpdated` round-trip that refreshes the preview panel code area.
+  - **Cancel** — closes the popup panel.
 
-**Live var sync:** `vscode.workspace.onDidChangeTextDocument` (debounced 300 ms, scoped to the temp document URI) re-extracts `<VK-xxx>` tokens from the editor content. When the token set changes, the extension posts `{ command: 'updateVars', vars: [...] }` to the webview, which rebuilds the input fields while preserving values the user has already typed.
+**CSP requirement:** The popup panel must be created with `enableScripts: true`. If it was previously created with `enableScripts: false` (e.g. while the user hovered a multi-block file first), all button handlers are silently blocked. The panel is always created with `enableScripts: true` to prevent this.
 
-**Insert flow:** the extension reads `tempDoc.getContent()` for the final code, resolves `<VK-xxx>` tokens from the webview input values, then calls `performInsert` to inject at cursor or send to terminal.
+**Webview ↔ extension message protocol:**
 
-**Cancellation and cleanup:** closing either panel (webview or editor tab) resolves the `waitForEditDecision` promise with `null` and disposes both surfaces cleanly — no "save?" prompts because `TempDocument.dispose()` calls `workbench.action.revertAndCloseActiveEditor`.
-
-**Short-circuit rule:** artifacts with zero VK vars **and** fewer than 5 lines of code skip edit mode entirely — `performInsert` is called directly with an empty vars map.
+| Direction | Command | Payload |
+|---|---|---|
+| webview → ext | `insert` | `{ code, vars: Record<string,string> }` |
+| webview → ext | `fullEdit` | — |
+| webview → ext | `cancel` | — |
+| webview → ext | `codeChanged` | `{ code: string }` |
+| ext → webview | `updateRows` | `{ html: string }` — re-rendered highlighted rows |
+| ext → webview | `updateVars` | `{ vars: ParsedVar[] }` |
+| ext → webview | `fileUpdated` | `{ code, vars }` — after .md save |
+| ext → webview | `switchMode` | `{ mode: 'preview' \| 'edit' }` |
 
 ---
 
