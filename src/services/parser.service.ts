@@ -16,7 +16,6 @@ const VALID_TYPES = new Set<string>(['snippet', 'template', 'command', 'agent', 
  *
  * @example
  * parseFrontmatter('---\ntype: template\ntitle: React Component\nlanguage: tsx\n---\n')
- * // → { type: 'template', title: 'React Component', language: 'tsx' }
  */
 function parseFrontmatter(content: string): ParsedFrontmatter {
     // Match everything between the opening and closing --- fences
@@ -58,7 +57,6 @@ function parseFrontmatter(content: string): ParsedFrontmatter {
  *
  * @example
  * parseCodeBlock('---\ntype: snippet\n---\n\n```javascript\nconsole.log("hi");\n```')
- * // → { code: 'console.log("hi");', fenceLang: 'javascript' }
  */
 function parseCodeBlock(content: string): { code: string; fenceLang?: string } {
     // Strip frontmatter before scanning to avoid matching a fence inside it
@@ -82,7 +80,6 @@ function parseCodeBlock(content: string): { code: string; fenceLang?: string } {
  *
  * @example
  * parseVarLines('port=8080\nimage=nginx\n')
- * // → [{ name: 'port', defaultValue: '8080' }, { name: 'image', defaultValue: 'nginx' }]
  */
 function parseVarLines(raw: string): ParsedVar[] {
     return raw
@@ -107,13 +104,9 @@ function parseVarLines(raw: string): ParsedVar[] {
  * @returns Ordered array of `ParsedVar` objects, or `[]` when no vars section exists.
  *
  * @example
- * // Fenced format (type: variables)
  * parseVars('...\n```vars\nAPI_URL=http://localhost\n```')
- * // → [{ name: 'API_URL', defaultValue: 'http://localhost' }]
  *
- * // Unfenced format (snippet / command / template)
  * parseVars('...\n```javascript\n...\n```\n\nvars:\nroute=/test\n')
- * // → [{ name: 'route', defaultValue: '/test' }]
  */
 function parseVars(content: string): ParsedVar[] {
     // Priority 1: fenced ```vars block — used by type: variables files
@@ -143,7 +136,6 @@ function parseVars(content: string): ParsedVar[] {
  *
  * @example
  * extractVars('curl <VK-host>/<VK-path> -H "x: <VK-host>"')
- * // → [{ name: 'VK-host', defaultValue: '' }, { name: 'VK-path', defaultValue: '' }]
  */
 export function extractVars(code: string): ParsedVar[] {
     const matches = [...code.matchAll(/<VK-([A-Za-z]\w*)>/g)];
@@ -173,11 +165,9 @@ export function extractVars(code: string): ParsedVar[] {
  *
  * @example
  * resolveVars('http://<VK-host>:<VK-port>', { 'VK-host': 'localhost', 'VK-port': '3000' })
- * // → 'http://localhost:3000'
  *
  * @example
  * resolveVars('<VK-known> <VK-unknown>', { 'VK-known': 'hi' })
- * // → 'hi <VK-unknown>'
  */
 export function resolveVars(code: string, vars: Record<string, string>): string {
     return code.replaceAll(/<VK-([A-Za-z]\w*)>/g, (match, hint: string) => {
@@ -202,11 +192,8 @@ export function resolveVars(code: string, vars: Record<string, string>): string 
  *
  * @example
  * parseBlocks('---\ntype: snippet\n---\n## Dev\ndev server\n```bash\nhttp://<VK-host>\n```\n## Prod\n```bash\nhttp://prod.example.com\n```')
- * // → [
- * //   { heading: 'Dev',  description: 'dev server', code: 'http://<VK-host>', fenceLang: 'bash', vars: [{ name: 'VK-host', defaultValue: '' }] },
- * //   { heading: 'Prod', description: '',           code: 'http://prod.example.com', fenceLang: 'bash', vars: [] },
- * // ]
  */
+
 export function parseBlocks(content: string): ParsedBlock[] {
     // Strip frontmatter before scanning
     const body = content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
@@ -256,15 +243,8 @@ export function parseBlocks(content: string): ParsedBlock[] {
  *
  * @example
  * parseArtifactFile('/vault/Snippets/Web/express-route.md', '/vault/Snippets')
- * // → {
- * //   filePath:     '/vault/Snippets/Web/express-route.md',
- * //   fileName:     'express-route',
- * //   relativePath: 'Web/express-route.md',
- * //   frontmatter:  { type: 'snippet', title: 'Express Route', language: 'javascript' },
- * //   code:         'app.get("/{{route}}", (req, res) => { ... })',
- * //   vars:         [{ name: 'route', defaultValue: '/test' }],
- * // }
  */
+
 /**
  * Parses pre-read vault `.md` file content into a structured object.
  *
@@ -282,6 +262,7 @@ export function parseBlocks(content: string): ParsedBlock[] {
  * const content = new TextDecoder().decode(bytes);
  * parseFromContent(content, uri.fsPath, rootUri.fsPath);
  */
+
 export function parseFromContent(content: string, filePath: string, artifactRootDir: string): ParsedArtifactFile {
     const frontmatter = parseFrontmatter(content);
     const { code, fenceLang } = parseCodeBlock(content);
