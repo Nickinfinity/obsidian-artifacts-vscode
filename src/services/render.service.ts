@@ -42,7 +42,7 @@ function renderLineHtml(line: string, fenceLang?: string): string {
     // and only safe identifier characters, guaranteeing they pass through hljs
     // as a single untouched text node.
     const tokenMap: [string, string][] = [];
-    const safe = line.replace(VK_TOKEN_RE, (match) => {
+    const safe = line.replaceAll(VK_TOKEN_RE, (match) => {
         const placeholder = `__VK${tokenMap.length}__`;
         tokenMap.push([placeholder, match]);
         return placeholder;
@@ -96,6 +96,30 @@ function renderLineHtml(line: string, fenceLang?: string): string {
  * renderCodeHtml('const x = <VK-val>;', 'javascript')
  * // → '<div class="code-block-wrapper"><div class="code-line-row">…</div></div>'
  */
+/**
+ * Renders each line of `code` as a `<div class="code-line-row">` string and
+ * returns them joined — **without** the outer `<div class="code-block-wrapper">` wrapper.
+ *
+ * Use this when the caller supplies its own wrapper element (e.g. the editable
+ * code area in the artifact preview panel).
+ *
+ * @param code      - Raw source code string; newlines split into separate rows.
+ * @param fenceLang - Optional highlight.js language identifier.
+ * @returns Concatenated row HTML, or `''` for empty input.
+ *
+ * @example
+ * renderCodeRowsHtml('const x = 1;', 'javascript')
+ * // → '<div class="code-line-row">…</div>'
+ */
+export function renderCodeRowsHtml(code: string, fenceLang?: string): string {
+    if (!code) { return ''; }
+    return code.split('\n').map((line, i) => {
+        const content = renderLineHtml(line, fenceLang);
+        const num     = i + 1;
+        return `<div class="code-line-row"><span class="line-number" contenteditable="false">${num}</span><span class="code-content">${content}</span></div>`;
+    }).join('');
+}
+
 export function renderCodeHtml(code: string, fenceLang?: string): string {
     if (!code) { return ''; }
 
@@ -105,8 +129,8 @@ export function renderCodeHtml(code: string, fenceLang?: string): string {
         // code-line-row contains the substring "code-line", so the row element
         // satisfies both the code-line-row test and the code-line count test.
         // A separate span with class="code-line" would double-count.
-        return `<div class="code-line-row"><span class="line-number">${num}</span><span class="code-content">${content}</span></div>`;
-    });
+        return `<div class="code-line-row"><span class="line-number" contenteditable="false">${num}</span><span class="code-content">${content}</span></div>`;
+    }).join('');
 
-    return `<div class="code-block-wrapper">${rows.join('')}</div>`;
+    return `<div class="code-block-wrapper">${rows}</div>`;
 }

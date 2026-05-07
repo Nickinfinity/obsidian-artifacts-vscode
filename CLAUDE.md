@@ -149,6 +149,23 @@ Only the VS Code API, Node `fs`, and Node `path` are used — no third-party pac
 
 ---
 
+## Edit Mode — Two-Panel Layout
+
+When the user selects an artifact, edit mode opens two panels side by side:
+
+- **Right** — a real VS Code editor tab containing the artifact's code, created via `TempDocument` (`src/services/temp-document.service.ts`). The document is opened with `vscode.workspace.openTextDocument({ content, language })` so the full language server (syntax highlighting, IntelliSense, formatting) is active.
+- **Left** — a webview panel (`ViewColumn.One`) showing the artifact's title, type/language badges, description, VK var input fields, and **Insert** / **Cancel** buttons. No code preview — the real editor is the source of truth for code.
+
+**Live var sync:** `vscode.workspace.onDidChangeTextDocument` (debounced 300 ms, scoped to the temp document URI) re-extracts `<VK-xxx>` tokens from the editor content. When the token set changes, the extension posts `{ command: 'updateVars', vars: [...] }` to the webview, which rebuilds the input fields while preserving values the user has already typed.
+
+**Insert flow:** the extension reads `tempDoc.getContent()` for the final code, resolves `<VK-xxx>` tokens from the webview input values, then calls `performInsert` to inject at cursor or send to terminal.
+
+**Cancellation and cleanup:** closing either panel (webview or editor tab) resolves the `waitForEditDecision` promise with `null` and disposes both surfaces cleanly — no "save?" prompts because `TempDocument.dispose()` calls `workbench.action.revertAndCloseActiveEditor`.
+
+**Short-circuit rule:** artifacts with zero VK vars **and** fewer than 5 lines of code skip edit mode entirely — `performInsert` is called directly with an empty vars map.
+
+---
+
 ## Vault File Format
 
 Each artifact is a `.md` file following this structure:

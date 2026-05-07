@@ -1,8 +1,11 @@
 import * as vscode from 'vscode';
-import { parseFromContent, resolveVars } from '../../services/parser.service.js';
-import { renderCodeHtml } from '../../services/render.service.js';
+import { parseFromContent, resolveVars, extractVars } from '../../services/parser.service.js';
+import { renderCodeHtml, renderCodeRowsHtml } from '../../services/render.service.js';
+import { patchFrontmatterField, patchVarDefaults } from '../../services/artifact-patcher.service.js';
+import { PreviewModeController } from '../../services/preview-mode.service.js';
 import { getNonce } from '../../utils/helpers.js';
 import type { ParsedArtifactFile, ParsedBlock, ParsedVar } from '../../types/parsed-artifact.types.js';
+import type { SectionKey } from '../../services/preview-mode.service.js';
 
 /** QuickPick item with optional vault-specific metadata. */
 interface ArtifactItem extends vscode.QuickPickItem {
@@ -92,6 +95,15 @@ class ArtifactNavigator {
     // popup panel is first created, then reused for every subsequent HTML render.
     private cssUri    = '';
     private cspSource = '';
+
+    // ── Preview panel interactive state ───────────────────────────────────────
+    private currentPreviewArtifact: ParsedArtifactFile | undefined;
+    private modeController: PreviewModeController | undefined;
+    /** Subscription for the preview panel's `onDidReceiveMessage`; replaced on each new artifact. */
+    private previewMsgSub: vscode.Disposable | undefined;
+    /** Active subscriptions for fullEdit file watchers; cleared by `tearDownFullEdit`. */
+    private fullEditSubs: vscode.Disposable[] = [];
+    private fullEditDebounce: ReturnType<typeof setTimeout> | undefined;
 
     constructor(
         rootUri: vscode.Uri,
@@ -222,7 +234,7 @@ class ArtifactNavigator {
 
             // ── Detail: vars summary (names only, no defaults) ────────────────
             const detail = block.vars.length > 0
-                ? `$(symbol-variable)  ${block.vars.map(v => v.name).join('  |  ')}`
+                ? `$(symbol-variable)  ${block.vars.map(v => v.name.startsWith('VK-') ? v.name.slice(3) : v.name).join('  |  ')}`
                 : undefined;
 
             items.push({ label: `$(code)  ${block.heading}`, description: firstSentence || undefined, detail, block });
@@ -315,7 +327,7 @@ class ArtifactNavigator {
                     'Artifact Preview',
                     { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
                     {
-                        enableScripts: false,
+                        enableScripts: true,
                         retainContextWhenHidden: true,
                         localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'src', 'ui')],
                     }
@@ -386,6 +398,11 @@ class ArtifactNavigator {
      * keyboard focus on the QuickPick so the user can keep navigating with arrow keys.
      */
     private async showPreviewPanel(artifact: ParsedArtifactFile): Promise<void> {
+        // Tear down any active fullEdit watchers before switching to a new artifact.
+        this.tearDownFullEdit();
+        this.currentPreviewArtifact = artifact;
+        this.modeController         = new PreviewModeController(artifact.code);
+
         if (!this.popupPanel) {
             try {
                 this.popupPanel = vscode.window.createWebviewPanel(
@@ -398,7 +415,12 @@ class ArtifactNavigator {
                         localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'src', 'ui')],
                     }
                 );
-                this.popupPanel.onDidDispose(() => { this.popupPanel = undefined; });
+                this.popupPanel.onDidDispose(() => {
+                    this.tearDownFullEdit();
+                    this.previewMsgSub?.dispose();
+                    this.previewMsgSub = undefined;
+                    this.popupPanel    = undefined;
+                });
                 // Resolve CSS URI once — reused for all subsequent renders.
                 this.cssUri    = this.popupPanel.webview.asWebviewUri(
                     vscode.Uri.joinPath(this.extensionUri, 'src', 'ui', 'styles.css')
@@ -410,8 +432,9 @@ class ArtifactNavigator {
                 return;
             }
         }
-        const codeHtml = renderCodeHtml(artifact.code, artifact.frontmatter.language);
-        this.popupPanel.webview.html = renderPreviewHtml(artifact, codeHtml, this.cssUri, this.cspSource);
+        const codeRowsHtml = renderCodeRowsHtml(artifact.code, artifact.frontmatter.language);
+        this.popupPanel.webview.html = renderPreviewHtml(artifact, codeRowsHtml, getNonce(), this.cssUri, this.cspSource);
+        this.setupPreviewMessageHandler();
         // reveal() is what makes the panel tab visible in its column.
         this.popupPanel.reveal(this.popupPanel.viewColumn, true /* preserveFocus */);
         out.appendLine(`[popup] preview → ${artifact.fileName}`);
@@ -435,11 +458,13 @@ class ArtifactNavigator {
             return;
         }
 
-        // ── Block item accepted: go straight to edit mode for that block ─────
+        // ── Block item accepted: keep preview panel, focus it for interaction ─
         if (item.block && this.currentArtifact) {
+            const blockArtifact = blockAsArtifact(item.block, this.currentArtifact);
             this.keepPopupOnHide = true;
             this.qp.hide();
-            await this.openEditMode(this.currentArtifact, item.block.code, item.block.vars);
+            await this.showPreviewPanel(blockArtifact);
+            this.popupPanel?.reveal(this.popupPanel.viewColumn ?? vscode.ViewColumn.Beside, false);
             return;
         }
 
@@ -457,84 +482,219 @@ class ArtifactNavigator {
             return;
         }
 
-        // ── File selected: switch popup to edit mode ───────────────────────────
+        // ── Single-block file: keep preview panel as the interaction surface ──
         this.keepPopupOnHide = true;
         this.qp.hide();
-        await this.openEditMode(artifact);
+        await this.showPreviewPanel(artifact);
+        this.popupPanel?.reveal(this.popupPanel.viewColumn ?? vscode.ViewColumn.Beside, false);
+    }
+
+    // ── Preview panel message handling ───────────────────────────────────────
+
+    /**
+     * Registers (or re-registers) a `onDidReceiveMessage` listener on the current
+     * popup panel.  Disposes the previous subscription first so navigation between
+     * artifacts never accumulates stale listeners.
+     *
+     * @example
+     * this.setupPreviewMessageHandler();
+     */
+    private setupPreviewMessageHandler(): void {
+        this.previewMsgSub?.dispose();
+        this.previewMsgSub = undefined;
+        if (!this.popupPanel) { return; }
+        this.previewMsgSub = this.popupPanel.webview.onDidReceiveMessage(msg => {
+            void this.handlePreviewMessage(msg as Record<string, unknown>);
+        });
     }
 
     /**
-     * Ensures the popup panel exists, renders it in interactive edit mode for
-     * the given artifact, waits for Insert / Cancel, then performs the insert.
+     * Dispatches a single message from the preview webview to the correct handler.
      *
-     * `codeOverride` and `varsOverride` substitute the artifact's own `code` and
-     * `vars` when rendering and inserting — used for block-item selections so the
-     * block's content is shown while `artifact.frontmatter.type` still drives
-     * command-vs-snippet routing in `performInsert`.
-     *
-     * @param artifact      - Artifact supplying frontmatter (type, title, language).
-     * @param codeOverride  - Block code to show/insert instead of `artifact.code`.
-     * @param varsOverride  - Block vars to show instead of `artifact.vars`.
+     * @param msg - Raw message object from `onDidReceiveMessage`.
      *
      * @example
-     * await this.openEditMode(artifact);
-     * await this.openEditMode(parent, block.code, block.vars);
+     * await this.handlePreviewMessage({ command: 'insert', vars: {}, code: '...' });
      */
-    private async openEditMode(artifact: ParsedArtifactFile, codeOverride?: string, varsOverride?: ParsedVar[]): Promise<void> {
-        // Ensure the popup panel exists (the user might have pressed Enter before
-        // the 120 ms debounce fired and created it).
-        if (!this.popupPanel) {
-            try {
-                this.popupPanel = vscode.window.createWebviewPanel(
-                    POPUP_VIEW_TYPE,
-                    'Artifact Preview',
-                    { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
-                    {
-                        enableScripts: true,
-                        retainContextWhenHidden: true,
-                        localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'src', 'ui')],
-                    }
-                );
-                this.popupPanel.onDidDispose(() => { this.popupPanel = undefined; });
-                this.cssUri    = this.popupPanel.webview.asWebviewUri(
-                    vscode.Uri.joinPath(this.extensionUri, 'src', 'ui', 'styles.css')
-                ).toString();
-                this.cspSource = this.popupPanel.webview.cspSource;
-            } catch (err) {
-                out.appendLine(`[popup] create FAILED in accept: ${(err as Error).message}`);
-                await this.insertWithInputBoxFallback(artifact);
-                return;
+    private async handlePreviewMessage(msg: Record<string, unknown>): Promise<void> {
+        const cmd = msg.command as string;
+        if      (cmd === 'startEdit')     { this.modeController?.startEditingSection(msg.section as SectionKey); }
+        else if (cmd === 'cancelEdit')    { this.modeController?.stopEditingSection(msg.section as SectionKey); }
+        else if (cmd === 'quickEdit')     { this.modeController?.enterQuickEdit(); }
+        else if (cmd === 'backToPreview') { this.modeController?.enterPreview(); }
+        else if (cmd === 'fullEdit')      { this.handleFullEdit(); }
+        else if (cmd === 'saveSection')   { await this.handleSaveSection(msg); }
+        else if (cmd === 'insert')        { this.handleInsert(msg); }
+        else if (cmd === 'cancel')        { this.popupPanel?.dispose(); }
+    }
+
+    /**
+     * Reads, patches, and writes the current artifact file for a `saveSection` message.
+     * Posts `sectionSaved` (success/failure) and, on success, `fileUpdated` to the webview.
+     *
+     * @param msg - The raw `saveSection` message.
+     *
+     * @example
+     * await this.handleSaveSection({ command: 'saveSection', section: 'title', value: 'New' });
+     */
+    private async handleSaveSection(msg: Record<string, unknown>): Promise<void> {
+        const artifact = this.currentPreviewArtifact;
+        if (!artifact) { return; }
+        const fileUri = vscode.Uri.file(artifact.filePath);
+        const section = msg.section as string;
+        try {
+            const bytes = await vscode.workspace.fs.readFile(fileUri);
+            let content = new TextDecoder().decode(bytes);
+            if (section === 'varDefaults') {
+                content = patchVarDefaults(content, msg.value as Record<string, string>);
+            } else {
+                content = patchFrontmatterField(content, section, msg.value as string);
             }
-        }
-
-        const code     = codeOverride ?? artifact.code;
-        const editVars = varsOverride ?? artifact.vars;
-        const editArtifact = (codeOverride !== undefined || varsOverride !== undefined)
-            ? { ...artifact, code, vars: editVars }
-            : artifact;
-
-        const codeHtml = renderCodeHtml(code, artifact.frontmatter.language);
-
-        this.popupPanel.webview.html = renderEditHtml(editArtifact, getNonce(), codeHtml, this.cssUri, this.cspSource);
-        this.popupPanel.reveal(this.popupPanel.viewColumn, false /* take focus */);
-        out.appendLine(`[popup] edit mode → ${artifact.fileName}`);
-
-        const vars = await waitForEditMessage(this.popupPanel);
-        this.popupPanel?.dispose();
-        this.popupPanel = undefined;
-
-        if (vars !== null) {
-            performInsert(this.targetEditor, editArtifact, vars);
+            await vscode.workspace.fs.writeFile(fileUri, new TextEncoder().encode(content));
+            const updated = parseFromContent(content, fileUri.fsPath, this.rootUri.fsPath);
+            this.parseCache.set(fileUri.toString(), updated);
+            this.currentPreviewArtifact = updated;
+            this.modeController?.stopEditingSection(section as SectionKey);
+            // sectionSaved before fileUpdated so the webview exits edit mode first,
+            // then fileUpdated can safely update all non-editing sections.
+            void this.popupPanel?.webview.postMessage({ command: 'sectionSaved', section, success: true });
+            void this.popupPanel?.webview.postMessage({ command: 'fileUpdated', artifact: updated });
+        } catch {
+            void this.popupPanel?.webview.postMessage({ command: 'sectionSaved', section, success: false });
         }
     }
 
-    /** Fallback when the popup can't be created — uses showInputBox (original behaviour). */
-    private async insertWithInputBoxFallback(artifact: ParsedArtifactFile): Promise<void> {
-        const resolved = artifact.vars.length > 0
-            ? await resolveVarsInteractive(artifact.vars)
-            : {};
-        if (resolved === null) { return; }
-        performInsert(this.targetEditor, artifact, resolved);
+    /**
+     * Opens the artifact's real `.md` file in an editor tab and sets up watchers
+     * for `onDidSaveTextDocument` (→ `fileUpdated`) and `onDidChangeTextDocument`
+     * debounced 500 ms (→ `updateVars`).
+     *
+     * @example
+     * this.handleFullEdit();
+     */
+    private handleFullEdit(): void {
+        const artifact = this.currentPreviewArtifact;
+        if (!artifact) { return; }
+        this.modeController?.enterFullEdit();
+        const fileUri = vscode.Uri.file(artifact.filePath);
+        void vscode.window.showTextDocument(fileUri, { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false });
+        this.setupFullEdit(fileUri);
+    }
+
+    /**
+     * Performs insert using the current artifact code (or edited code for quickEdit /
+     * fullEdit modes), then closes the picker and panel.
+     *
+     * @param msg - The raw `insert` message, optionally carrying an inline `code` string.
+     *
+     * @example
+     * this.handleInsert({ command: 'insert', vars: { 'VK-x': '1' }, code: 'const x = 1;' });
+     */
+    private handleInsert(msg: Record<string, unknown>): void {
+        const artifact = this.currentPreviewArtifact;
+        if (!artifact) { return; }
+        const mode = this.modeController?.mode ?? 'preview';
+        // fullEdit: prefer the live .md document content (canonical, possibly edited externally).
+        // preview/quickEdit: prefer msg.code from the contenteditable webview surface.
+        let code = artifact.code;
+        if (mode === 'fullEdit') {
+            const fileUri = vscode.Uri.file(artifact.filePath);
+            const openDoc = vscode.workspace.textDocuments.find(d => d.uri.toString() === fileUri.toString());
+            if (openDoc) {
+                code = parseFromContent(openDoc.getText(), artifact.filePath, this.rootUri.fsPath).code;
+            } else if (typeof msg.code === 'string') {
+                code = msg.code;
+            }
+        } else if (typeof msg.code === 'string') {
+            code = msg.code;
+        }
+        // ── Merge collected values with artifact defaults ──────────────────────
+        // Empty collected value → fall back to defaultValue.
+        // Both empty → omit key so resolveVars leaves the <VK-xxx> token intact.
+        const rawVars = msg.vars as Record<string, string>;
+        const resolvedVars: Record<string, string> = {};
+        for (const v of artifact.vars) {
+            const collected = rawVars[v.name] ?? '';
+            const effective = collected || v.defaultValue;
+            if (effective) { resolvedVars[v.name] = effective; }
+        }
+
+        performInsert(this.targetEditor, { ...artifact, code }, resolvedVars);
+        this.tearDownFullEdit();
+        this.popupPanel?.dispose();
+        this.qp.hide();
+    }
+
+    // ── fullEdit file watchers ────────────────────────────────────────────────
+
+    /**
+     * Subscribes to document save and change events for the given file URI.
+     * Replaces any previously active fullEdit subscriptions.
+     *
+     * @param fileUri - The real artifact file being edited.
+     *
+     * @example
+     * this.setupFullEdit(vscode.Uri.file(artifact.filePath));
+     */
+    private setupFullEdit(fileUri: vscode.Uri): void {
+        this.tearDownFullEdit();
+        const uriKey = fileUri.toString();
+        this.fullEditSubs.push(
+            vscode.workspace.onDidSaveTextDocument(doc => {
+                if (doc.uri.toString() !== uriKey) { return; }
+                void this.onFullEditSave(doc.getText(), fileUri);
+            }),
+            vscode.workspace.onDidChangeTextDocument(change => {
+                if (change.document.uri.toString() !== uriKey) { return; }
+                if (this.fullEditDebounce) { clearTimeout(this.fullEditDebounce); }
+                this.fullEditDebounce = setTimeout(() => this.flushFullEditVarSync(change.document), 500);
+            }),
+        );
+    }
+
+    /**
+     * Sends an `updateVars` message to the webview after the 500 ms debounce fires.
+     *
+     * @param doc - The document that changed (the real artifact file).
+     *
+     * @example
+     * this.flushFullEditVarSync(document);
+     */
+    private flushFullEditVarSync(doc: vscode.TextDocument): void {
+        this.fullEditDebounce = undefined;
+        const vars = extractVars(doc.getText());
+        void this.popupPanel?.webview.postMessage({ command: 'updateVars', vars });
+    }
+
+    /**
+     * Re-parses the artifact file content after a save and posts `fileUpdated`.
+     *
+     * @param content - Raw file content string (already read by the caller).
+     * @param fileUri - URI of the artifact file.
+     *
+     * @example
+     * await this.onFullEditSave(doc.getText(), fileUri);
+     */
+    private async onFullEditSave(content: string, fileUri: vscode.Uri): Promise<void> {
+        const artifact = this.currentPreviewArtifact;
+        if (!artifact) { return; }
+        const updated = parseFromContent(content, fileUri.fsPath, this.rootUri.fsPath);
+        this.parseCache.set(fileUri.toString(), updated);
+        this.currentPreviewArtifact = updated;
+        void this.popupPanel?.webview.postMessage({ command: 'fileUpdated', artifact: updated });
+    }
+
+    /**
+     * Disposes all active fullEdit subscriptions and cancels any pending debounce timer.
+     * Safe to call multiple times.
+     *
+     * @example
+     * this.tearDownFullEdit();
+     */
+    private tearDownFullEdit(): void {
+        this.fullEditSubs.forEach(s => s.dispose());
+        this.fullEditSubs = [];
+        if (this.fullEditDebounce) { clearTimeout(this.fullEditDebounce); this.fullEditDebounce = undefined; }
     }
 
     private relPath(uri: vscode.Uri): string {
@@ -543,29 +703,6 @@ class ArtifactNavigator {
         if (p === root) { return ''; }
         return p.startsWith(root) ? p.slice(root.length + 1).replaceAll('\\', ' / ') : '';
     }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/**
- * Returns a Promise that resolves once the popup webview posts an `insert` or
- * `cancel` message. Also resolves null if the panel is disposed before that.
- */
-function waitForEditMessage(panel: vscode.WebviewPanel): Promise<Record<string, string> | null> {
-    return new Promise(resolve => {
-        const subs: vscode.Disposable[] = [];
-        const done = (result: Record<string, string> | null) => {
-            subs.forEach(s => s.dispose());
-            resolve(result);
-        };
-        subs.push(
-            panel.webview.onDidReceiveMessage(msg => {
-                if (msg.command === 'insert') { done(msg.vars as Record<string, string>); }
-                else { done(null); }
-            }),
-            panel.onDidDispose(() => done(null))
-        );
-    });
 }
 
 // ── Block adapter ─────────────────────────────────────────────────────────────
@@ -636,7 +773,7 @@ function buildItem(
 
     // ── detail: vars then tags, each section prefixed with a codicon ─────────
     const varsPart = parsed?.vars.length
-        ? `$(symbol-variable)  ${parsed.vars.map(v => v.name + '=' + v.defaultValue).join('  |  ')}`
+        ? `$(symbol-variable)  ${parsed.vars.map(v => (v.name.startsWith('VK-') ? v.name.slice(3) : v.name) + (v.defaultValue ? '=' + v.defaultValue : '')).join('  |  ')}`
         : '';
     const tagsPart = parsed?.frontmatter.tags?.length
         ? `$(tag)  ${parsed.frontmatter.tags.map(t => '#' + t).join(' ')}`
@@ -656,33 +793,6 @@ function relFsPath(uri: vscode.Uri, rootFs: string): string {
 }
 
 // ── Insert helpers ────────────────────────────────────────────────────────────
-
-/**
- * Prompts the user for each variable's value via `showInputBox`.
- *
- * Labels are derived from the variable name via `labelForVar` — e.g.
- * `VK-min_price` becomes "Min price". Returns `null` if the user cancels any box.
- *
- * @param vars - Ordered list of variables to prompt for.
- * @returns Resolved `{ name → value }` map, or `null` on cancel.
- *
- * @example
- * const values = await resolveVarsInteractive(artifact.vars);
- * if (values !== null) { performInsert(editor, artifact, values); }
- */
-async function resolveVarsInteractive(vars: ParsedVar[]): Promise<Record<string, string> | null> {
-    const result: Record<string, string> = {};
-    for (const v of vars) {
-        const label = labelForVar(v.name);
-        const value = await vscode.window.showInputBox({
-            title: label, prompt: `Enter a value for ${label}`,
-            value: v.defaultValue, placeHolder: v.defaultValue || label, ignoreFocusOut: true,
-        });
-        if (value === undefined) { return null; }
-        result[v.name] = value;
-    }
-    return result;
-}
 
 /**
  * Substitutes variables and delivers resolved content to the editor, terminal, or clipboard.
@@ -721,18 +831,27 @@ function performInsert(
 // ── Popup HTML: preview mode (read-only) ─────────────────────────────────────
 
 /**
- * Renders the read-only artifact preview HTML.
+ * Renders the interactive artifact preview HTML.
+ *
+ * The code area is contenteditable — users can edit/paste, but edits are not
+ * saved to the `.md` file. Variables are filled inline. Buttons:
+ * - **Insert** posts current code + variable values to the extension.
+ * - **Edit .md** opens the underlying `.md` file in a real editor (where save updates the file).
+ * - **Cancel** disposes the panel.
  *
  * @param a         - Parsed artifact to display.
+ * @param codeHtml  - Pre-rendered code HTML (from `renderCodeHtml`) — supplies initial content.
+ * @param nonce     - CSP nonce for the inline script.
  * @param cssUri    - Webview URI for the shared stylesheet.
  * @param cspSource - Webview CSP source token (from `webview.cspSource`).
  *
  * @example
- * panel.webview.html = renderPreviewHtml(artifact, cssUri, cspSource);
+ * panel.webview.html = renderPreviewHtml(artifact, codeHtml, getNonce(), cssUri, cspSource);
  */
 function renderPreviewHtml(
     a: ParsedArtifactFile,
     codeHtml: string,
+    nonce: string,
     cssUri: string,
     cspSource: string
 ): string {
@@ -744,27 +863,210 @@ function renderPreviewHtml(
     const env      = a.frontmatter.env ? `<span class="pill">env: ${e(a.frontmatter.env)}</span>` : '';
     const target   = a.frontmatter.target ? `<span class="pill">target: ${e(a.frontmatter.target)}</span>` : '';
     const tagsHtml = (a.frontmatter.tags ?? []).map(t => `<span class="tag">${e(t)}</span>`).join('');
-    const varsHtml = a.vars.length > 0
-        ? `<table class="vt"><thead><tr><th>Variable</th><th>Default</th></tr></thead><tbody>${
-            a.vars.map(v => `<tr><td><code>${e(v.name)}</code></td><td class="def">${e(v.defaultValue) || '<em>—</em>'}</td></tr>`).join('')
-          }</tbody></table>`
-        : `<p class="muted">No variables defined.</p>`;
 
-    return popupShell(/* html */`
-    <h1>${title}</h1>
-    <div class="badges">
-      <span class="badge">${type}</span>
-      ${lang ? `<span class="badge lang">${lang}</span>` : ''}
-      ${env}${target}
-    </div>
-    ${desc ? `<p class="desc">${desc}</p>` : ''}
-    ${tagsHtml ? `<div class="tags">${tagsHtml}</div>` : ''}
-    ${codeHtml ? `<div class="slabel">Content</div>${codeHtml}` : ''}
-    <div class="slabel">Variables</div>
-    ${varsHtml}
-    <p class="path">${e(a.relativePath)}</p>
-    <p class="hint">Press Enter in the file list to edit variables and insert.</p>`,
-    cssUri, cspSource);
+    const inputsHtml = a.vars.length > 0
+        ? a.vars.map(v => `
+             <div class="input-row">
+               <label for="v-${e(v.name)}">${e(labelForVar(v.name))}</label>
+               <input id="v-${e(v.name)}" data-var="${e(v.name)}" type="text"
+                      value="${e(v.defaultValue)}" placeholder="${e(labelForVar(v.name))}">
+             </div>`).join('')
+        : '<p class="muted">No variables defined.</p>';
+
+    return /* html */`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<link rel="stylesheet" href="${cssUri}">
+</head>
+<body class="popup-body">
+  <h1>${title}</h1>
+  <div class="badges">
+    <span class="badge">${type}</span>
+    ${lang ? `<span class="badge lang">${lang}</span>` : ''}
+    ${env}${target}
+  </div>
+  ${desc ? `<p class="desc">${desc}</p>` : ''}
+  ${tagsHtml ? `<div class="tags">${tagsHtml}</div>` : ''}
+  <div class="slabel">Content <span class="slabel-hint">— editable, not saved to .md</span></div>
+  <div id="codeWrapper" class="code-block-wrapper editable" contenteditable="true" spellcheck="false" data-lang="${lang}">${codeHtml || ''}</div>
+  <div class="slabel">Variables</div>
+  <div class="inputs" id="varInputs">${inputsHtml}</div>
+  <div class="actions">
+    <button class="btn btn-insert"    id="insertBtn">Insert</button>
+    <button class="btn btn-secondary" id="editBtn">Edit .md</button>
+    <button class="btn btn-cancel"    id="cancelBtn">Cancel</button>
+  </div>
+  <p class="path">${e(a.relativePath)}</p>
+<script nonce="${nonce}">
+(function () {
+  const vscode      = acquireVsCodeApi();
+  const codeWrapper = document.getElementById('codeWrapper');
+  const varInputs   = document.getElementById('varInputs');
+
+  // ── Plain-text extraction ─────────────────────────────────────────────────
+  function extractCode() {
+    const rows = codeWrapper.querySelectorAll('.code-line-row');
+    if (rows.length === 0) { return codeWrapper.textContent || ''; }
+    const parts = [];
+    rows.forEach(r => {
+      const c = r.querySelector('.code-content');
+      parts.push(c ? c.textContent : '');
+    });
+    return parts.join('\\n');
+  }
+
+  // ── Render: line numbers + escape + VK highlight ─────────────────────────
+  function escHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  function vkWrap(html) {
+    return html.replace(/&lt;VK-([A-Za-z]\\w*)&gt;/g, '<span class="vk-var">&lt;VK-$1&gt;</span>');
+  }
+  function renderRows(code) {
+    const lines = code.split('\\n');
+    return lines.map(function (line, i) {
+      return '<div class="code-line-row"><span class="line-number" contenteditable="false">' +
+        (i + 1) + '</span><span class="code-content">' + vkWrap(escHtml(line)) + '</span></div>';
+    }).join('');
+  }
+
+  // ── Caret offset (counted across all .code-content text + joining \\n) ───
+  function getCaretOffset() {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) { return 0; }
+    const range = sel.getRangeAt(0);
+    if (!codeWrapper.contains(range.endContainer)) { return 0; }
+    const rows = codeWrapper.querySelectorAll('.code-line-row');
+    let offset = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const c = rows[i].querySelector('.code-content');
+      if (!c) { continue; }
+      if (c.contains(range.endContainer) || c === range.endContainer) {
+        const pre = document.createRange();
+        pre.selectNodeContents(c);
+        pre.setEnd(range.endContainer, range.endOffset);
+        return offset + pre.toString().length;
+      }
+      offset += c.textContent.length + 1;
+    }
+    return offset;
+  }
+  function setCaretOffset(offset) {
+    const rows = codeWrapper.querySelectorAll('.code-line-row');
+    let remaining = offset;
+    for (let i = 0; i < rows.length; i++) {
+      const c = rows[i].querySelector('.code-content');
+      if (!c) { continue; }
+      const len = c.textContent.length;
+      if (remaining <= len) { placeCaret(c, remaining); return; }
+      remaining -= len + 1;
+    }
+    const last = rows[rows.length - 1] && rows[rows.length - 1].querySelector('.code-content');
+    if (last) { placeCaret(last, last.textContent.length); }
+  }
+  function placeCaret(el, off) {
+    let remaining = off, target = null, targetOffset = 0;
+    (function walk(node) {
+      if (target) { return; }
+      if (node.nodeType === 3 /* TEXT_NODE */) {
+        if (remaining <= node.length) { target = node; targetOffset = remaining; }
+        else { remaining -= node.length; }
+        return;
+      }
+      for (let i = 0; i < node.childNodes.length && !target; i++) { walk(node.childNodes[i]); }
+    })(el);
+    const range = document.createRange();
+    if (target) { range.setStart(target, targetOffset); range.collapse(true); }
+    else        { range.selectNodeContents(el); range.collapse(false); }
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  // ── Re-render on input (debounced) ───────────────────────────────────────
+  let renderTimer;
+  function scheduleRender() {
+    if (renderTimer) { clearTimeout(renderTimer); }
+    renderTimer = setTimeout(function () {
+      renderTimer = undefined;
+      const code  = extractCode();
+      const caret = getCaretOffset();
+      codeWrapper.innerHTML = renderRows(code);
+      setCaretOffset(caret);
+    }, 150);
+  }
+  codeWrapper.addEventListener('input', scheduleRender);
+  codeWrapper.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      document.execCommand('insertText', false, '\\n');
+    }
+  });
+  codeWrapper.addEventListener('paste', function (ev) {
+    ev.preventDefault();
+    const text = (ev.clipboardData || window.clipboardData).getData('text/plain');
+    document.execCommand('insertText', false, text);
+  });
+
+  // ── Buttons ──────────────────────────────────────────────────────────────
+  function collectVars() {
+    const out = {};
+    document.querySelectorAll('[data-var]').forEach(function (el) { out[el.dataset.var] = el.value; });
+    return out;
+  }
+  document.getElementById('insertBtn').addEventListener('click', function () {
+    if (renderTimer) { clearTimeout(renderTimer); renderTimer = undefined; }
+    vscode.postMessage({ command: 'insert', vars: collectVars(), code: extractCode() });
+  });
+  document.getElementById('editBtn').addEventListener('click', function () {
+    vscode.postMessage({ command: 'fullEdit' });
+  });
+  document.getElementById('cancelBtn').addEventListener('click', function () {
+    vscode.postMessage({ command: 'cancel' });
+  });
+  // Ctrl/Cmd+Enter inserts.
+  document.addEventListener('keydown', function (ev) {
+    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
+      ev.preventDefault();
+      document.getElementById('insertBtn').click();
+    }
+  });
+
+  // ── Update var inputs on extension push (live VK detection) ──────────────
+  function rebuildVarInputs(vars) {
+    const existing = collectVars();
+    if (!vars || vars.length === 0) {
+      varInputs.innerHTML = '<p class="muted">No variables defined.</p>';
+      return;
+    }
+    function lbl(name) {
+      const hint = name.indexOf('VK-') === 0 ? name.slice(3) : name;
+      const j    = hint.split('_').join(' ').toLowerCase();
+      return j.charAt(0).toUpperCase() + j.slice(1);
+    }
+    function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    varInputs.innerHTML = vars.map(function (v) {
+      const value = existing[v.name] !== undefined ? existing[v.name] : (v.defaultValue || '');
+      return '<div class="input-row">' +
+        '<label for="v-' + esc(v.name) + '">' + esc(lbl(v.name)) + '</label>' +
+        '<input id="v-' + esc(v.name) + '" data-var="' + esc(v.name) + '" type="text" value="' + esc(value) + '" placeholder="' + esc(lbl(v.name)) + '">' +
+      '</div>';
+    }).join('');
+  }
+  window.addEventListener('message', function (event) {
+    const msg = event.data || {};
+    if (msg.command === 'updateVars')  { rebuildVarInputs(msg.vars); }
+    if (msg.command === 'fileUpdated' && msg.artifact) {
+      // Refresh code area to canonical .md content (Edit-mode save round-trip).
+      codeWrapper.innerHTML = renderRows(msg.artifact.code || '');
+      rebuildVarInputs(msg.artifact.vars);
+    }
+  });
+})();
+</script>
+</body>
+</html>`;
 }
 
 // ── Popup HTML: multi-block preview (read-only) ───────────────────────────────
@@ -817,92 +1119,6 @@ function renderMultiBlockPreviewHtml(
     <p class="path">${e(a.relativePath)}</p>
     <p class="hint">Press Enter to choose a block.</p>`,
     cssUri, cspSource);
-}
-
-// ── Popup HTML: edit mode (interactive) ──────────────────────────────────────
-
-/**
- * Renders the interactive variable-editing HTML for a selected artifact.
- *
- * @param a         - Parsed artifact to edit.
- * @param nonce     - CSP nonce for the inline script.
- * @param cssUri    - Webview URI for the shared stylesheet.
- * @param cspSource - Webview CSP source token (from `webview.cspSource`).
- *
- * @example
- * panel.webview.html = renderEditHtml(artifact, getNonce(), cssUri, cspSource);
- */
-function renderEditHtml(
-    a: ParsedArtifactFile,
-    nonce: string,
-    codeHtml: string,
-    cssUri: string,
-    cspSource: string
-): string {
-    const e = escHtml;
-    const title = e(a.frontmatter.title || a.fileName);
-    const type  = e(a.frontmatter.type);
-    const lang  = a.frontmatter.language ? e(a.frontmatter.language) : '';
-    const desc  = a.frontmatter.description ? e(a.frontmatter.description) : '';
-
-    const inputsHtml = a.vars.length > 0
-        ? `<div class="slabel">Variables</div>
-           <div class="inputs">${a.vars.map(v => `
-             <div class="input-row">
-               <label for="v-${e(v.name)}">${e(labelForVar(v.name))}</label>
-               <input id="v-${e(v.name)}" data-var="${e(v.name)}" type="text"
-                      value="${e(v.defaultValue)}" placeholder="${e(labelForVar(v.name))}">
-             </div>`).join('')}
-           </div>`
-        : '<p class="muted">No variables — ready to insert.</p>';
-
-    return /* html */`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}';">
-<link rel="stylesheet" href="${cssUri}">
-</head>
-<body class="popup-body">
-  <h1>${title}</h1>
-  <div class="badges">
-    <span class="badge">${type}</span>
-    ${lang ? `<span class="badge lang">${lang}</span>` : ''}
-  </div>
-  ${desc ? `<p class="desc">${desc}</p>` : ''}
-  ${codeHtml ? `<div class="slabel">Content</div>${codeHtml}` : ''}
-  ${inputsHtml}
-  <div class="actions">
-    <button class="btn btn-insert" id="insertBtn">Insert</button>
-    <button class="btn btn-cancel" id="cancelBtn">Cancel</button>
-  </div>
-<script nonce="${nonce}">
-(function () {
-  const vscode = acquireVsCodeApi();
-  document.getElementById('insertBtn').addEventListener('click', () => {
-    const vars = {};
-    document.querySelectorAll('[data-var]').forEach(el => {
-      vars[el.dataset.var] = el.value;
-    });
-    vscode.postMessage({ command: 'insert', vars });
-  });
-  document.getElementById('cancelBtn').addEventListener('click', () => {
-    vscode.postMessage({ command: 'cancel' });
-  });
-  // Allow Ctrl/Cmd+Enter to insert from a focused input
-  document.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-      document.getElementById('insertBtn').click();
-    }
-  });
-  // Focus first input if any
-  const first = document.querySelector('.input-row input');
-  if (first) { first.focus(); }
-})();
-</script>
-</body>
-</html>`;
 }
 
 // ── Popup HTML: empty state ───────────────────────────────────────────────────
