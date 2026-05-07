@@ -1,9 +1,20 @@
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { ArtifactType, ParsedArtifactFile, ParsedBlock, ParsedFrontmatter, ParsedVar } from '../types/parsed-artifact.types.js';
 
 // Accepted `type` values — any unrecognised value keeps the 'snippet' fallback.
 const VALID_TYPES = new Set<string>(['snippet', 'template', 'command', 'agent', 'variables']);
+
+// Frontmatter keys copied verbatim into `ParsedFrontmatter` (string-typed).
+const STRING_FRONTMATTER_KEYS = new Set<string>(['title', 'description', 'language', 'env', 'target']);
+
+// Shared regex constants — declared once to avoid SonarQube duplicated-literal flags
+// and to keep parsing rules in a single source of truth.
+const FRONTMATTER_BLOCK_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
+const FRONTMATTER_STRIP_RE = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/;
+const CODE_FENCE_RE        = /```(\w*)\r?\n([\s\S]*?)```/;
+const VARS_FENCE_RE        = /```vars\r?\n([\s\S]*?)```/;
+const VK_TOKEN_RE          = /<VK-([A-Za-z]\w*)>/g;
 
 /**
  * Extracts and parses the YAML frontmatter block from raw vault file content.
@@ -18,31 +29,48 @@ const VALID_TYPES = new Set<string>(['snippet', 'template', 'command', 'agent', 
  * parseFrontmatter('---\ntype: template\ntitle: React Component\nlanguage: tsx\n---\n')
  */
 function parseFrontmatter(content: string): ParsedFrontmatter {
-    // Match everything between the opening and closing --- fences
-    const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
     const result: ParsedFrontmatter = { type: 'snippet' };
+    const match = FRONTMATTER_BLOCK_RE.exec(content);
     if (!match) { return result; }
 
-    // Parse each `key: value` line — skip lines without a colon
     for (const line of match[1].split(/\r?\n/)) {
         const colonIdx = line.indexOf(':');
         if (colonIdx === -1) { continue; }
         const key = line.slice(0, colonIdx).trim();
         const raw = line.slice(colonIdx + 1).trim();
-
-        if (key === 'type') {
-            // Validate against the whitelist before assigning
-            if (VALID_TYPES.has(raw)) { result.type = raw as ArtifactType; }
-        } else if (key === 'tags') {
-            // Parse inline array syntax: `[a, b, c]` → `['a', 'b', 'c']`
-            const inner = raw.replace(/^\[|\]$/g, '');
-            result.tags = inner.split(',').map(t => t.trim()).filter(Boolean);
-        } else if (key === 'title' || key === 'description' || key === 'language' || key === 'env' || key === 'target') {
-            result[key] = raw;
-        }
+        applyFrontmatterField(result, key, raw);
     }
 
     return result;
+}
+
+/**
+ * Mutates `result` with a single `key: value` pair from the frontmatter block.
+ *
+ * Extracted from `parseFrontmatter` to lower its cognitive complexity (S3776) by
+ * isolating per-key validation/normalisation. Unrecognised keys are silently ignored.
+ *
+ * @param result - Frontmatter accumulator being populated.
+ * @param key    - Trimmed key name.
+ * @param raw    - Trimmed raw value string.
+ *
+ * @example
+ * applyFrontmatterField({ type: 'snippet' }, 'tags', '[a, b]')
+ */
+function applyFrontmatterField(result: ParsedFrontmatter, key: string, raw: string): void {
+    if (key === 'type') {
+        if (VALID_TYPES.has(raw)) { result.type = raw as ArtifactType; }
+        return;
+    }
+    if (key === 'tags') {
+        // Parse inline array syntax: `[a, b, c]` → `['a', 'b', 'c']`
+        const inner = raw.replaceAll(/^\[|\]$/g, '');
+        result.tags = inner.split(',').map(t => t.trim()).filter(Boolean);
+        return;
+    }
+    if (STRING_FRONTMATTER_KEYS.has(key)) {
+        (result as unknown as Record<string, string>)[key] = raw;
+    }
 }
 
 /**
@@ -60,8 +88,8 @@ function parseFrontmatter(content: string): ParsedFrontmatter {
  */
 function parseCodeBlock(content: string): { code: string; fenceLang?: string } {
     // Strip frontmatter before scanning to avoid matching a fence inside it
-    const afterFrontmatter = content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
-    const match = /```(\w*)\r?\n([\s\S]*?)```/.exec(afterFrontmatter);
+    const afterFrontmatter = content.replace(FRONTMATTER_STRIP_RE, '');
+    const match = CODE_FENCE_RE.exec(afterFrontmatter);
     if (!match) { return { code: '' }; }
     return {
         code:     match[2].trimEnd(),
@@ -110,13 +138,13 @@ function parseVarLines(raw: string): ParsedVar[] {
  */
 function parseVars(content: string): ParsedVar[] {
     // Priority 1: fenced ```vars block — used by type: variables files
-    const fenced = /```vars\r?\n([\s\S]*?)```/.exec(content);
+    const fenced = VARS_FENCE_RE.exec(content);
     if (fenced) { return parseVarLines(fenced[1]); }
 
     // Priority 2: unfenced section after the code block ("vars:" or "vars" label)
     const afterCode = content
-        .replace(/^---[\s\S]*?---/, '')     // strip frontmatter
-        .replace(/```\w*[\s\S]*?```/, ''); // strip code block
+        .replace(FRONTMATTER_STRIP_RE, '') // strip frontmatter
+        .replace(CODE_FENCE_RE, '');       // strip first code block
     const unfenced = /\bvars:?\s*\r?\n([\s\S]+?)(?:\n\n|\n*$)/.exec(afterCode);
     if (unfenced) { return parseVarLines(unfenced[1]); }
 
@@ -138,10 +166,9 @@ function parseVars(content: string): ParsedVar[] {
  * extractVars('curl <VK-host>/<VK-path> -H "x: <VK-host>"')
  */
 export function extractVars(code: string): ParsedVar[] {
-    const matches = [...code.matchAll(/<VK-([A-Za-z]\w*)>/g)];
     const seen = new Set<string>();
     const vars: ParsedVar[] = [];
-    for (const m of matches) {
+    for (const m of code.matchAll(VK_TOKEN_RE)) {
         const name = `VK-${m[1]}`;
         if (!seen.has(name)) {
             seen.add(name);
@@ -170,7 +197,7 @@ export function extractVars(code: string): ParsedVar[] {
  * resolveVars('<VK-known> <VK-unknown>', { 'VK-known': 'hi' })
  */
 export function resolveVars(code: string, vars: Record<string, string>): string {
-    return code.replaceAll(/<VK-([A-Za-z]\w*)>/g, (match, hint: string) => {
+    return code.replaceAll(VK_TOKEN_RE, (match, hint: string) => {
         const key = `VK-${hint}`;
         return key in vars ? vars[key] : match;
     });
@@ -196,7 +223,7 @@ export function resolveVars(code: string, vars: Record<string, string>): string 
 
 export function parseBlocks(content: string): ParsedBlock[] {
     // Strip frontmatter before scanning
-    const body = content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
+    const body = content.replace(FRONTMATTER_STRIP_RE, '');
 
     // Split on ## headings — keep delimiter at start of each chunk via lookahead
     const sections = body.split(/(?=^## )/m).filter(s => s.startsWith('## '));
@@ -204,46 +231,46 @@ export function parseBlocks(content: string): ParsedBlock[] {
 
     const blocks: ParsedBlock[] = [];
     for (const section of sections) {
-        // ── Extract heading ──────────────────────────────────────────────────
-        const headingMatch = /^## (.+)/.exec(section);
-        if (!headingMatch) { continue; }
-        const heading = headingMatch[1].trim();
-
-        // ── Extract fenced code block ────────────────────────────────────────
-        const fenceMatch = /```(\w*)\r?\n([\s\S]*?)```/.exec(section);
-        if (!fenceMatch) { continue; }  // heading without code block — skip
-        const fenceLang = fenceMatch[1] || undefined;
-        const code = fenceMatch[2].trimEnd();
-
-        // ── Description: text between heading line and the opening fence ─────
-        const headingEnd = section.indexOf('\n') + 1;
-        const fenceStart = section.indexOf('```');
-        const descRaw = section.slice(headingEnd, fenceStart).trim();
-
-        // ── Auto-detect vars from <VK-xxx> tokens ────────────────────────────
-        const vars = extractVars(code);
-
-        blocks.push({ heading, description: descRaw, code, fenceLang, vars });
+        const block = parseBlockSection(section);
+        if (block) { blocks.push(block); }
     }
-
-    // Only return blocks when at least one qualified section was found
-    return blocks.length > 0 ? blocks : [];
+    return blocks;
 }
 
 /**
- * Reads and fully parses a single vault `.md` artifact file into a structured object.
+ * Parses one `## Heading`-prefixed chunk into a `ParsedBlock`.
  *
- * Combines frontmatter, code block, and vars section into a `ParsedArtifactFile`
- * that the picker panel uses for display and insert-time variable resolution.
+ * Returns `null` when the chunk lacks either the heading or a fenced code block,
+ * letting `parseBlocks` skip malformed sections without nesting another `if`.
  *
- * @param filePath - Absolute path to the `.md` file on disk.
- * @param artifactRootDir - Absolute path to the artifact's root directory
- *   (e.g. `/vault/Snippets`). Used to compute the `relativePath` field.
- * @returns A fully populated `ParsedArtifactFile`, or `null` if the file cannot be read.
+ * @param section - Raw text of a single `##`-prefixed section, including its heading line.
+ * @returns Populated `ParsedBlock`, or `null` to signal "skip".
  *
  * @example
- * parseArtifactFile('/vault/Snippets/Web/express-route.md', '/vault/Snippets')
+ * parseBlockSection('## Dev\nlocal\n```bash\nhttp://<VK-host>\n```')
  */
+function parseBlockSection(section: string): ParsedBlock | null {
+    const headingMatch = /^## (.+)/.exec(section);
+    if (!headingMatch) { return null; }
+
+    const fenceMatch = CODE_FENCE_RE.exec(section);
+    if (!fenceMatch) { return null; }
+
+    const heading   = headingMatch[1].trim();
+    const fenceLang = fenceMatch[1] || undefined;
+    const code      = fenceMatch[2].trimEnd();
+
+    // Description: text between heading line and the opening fence
+    const headingEnd = section.indexOf('\n') + 1;
+    const fenceStart = section.indexOf('```');
+    const description = section.slice(headingEnd, fenceStart).trim();
+
+    // ` ```vars ``` ` fenced blocks carry `KEY=value` pairs (multi-block variable
+    // sets). Every other fence is code → auto-detect `<VK-…>` tokens.
+    const vars = fenceLang === 'vars' ? parseVarLines(code) : extractVars(code);
+
+    return { heading, description, code, fenceLang, vars };
+}
 
 /**
  * Parses pre-read vault `.md` file content into a structured object.
@@ -262,7 +289,6 @@ export function parseBlocks(content: string): ParsedBlock[] {
  * const content = new TextDecoder().decode(bytes);
  * parseFromContent(content, uri.fsPath, rootUri.fsPath);
  */
-
 export function parseFromContent(content: string, filePath: string, artifactRootDir: string): ParsedArtifactFile {
     const frontmatter = parseFrontmatter(content);
     const { code, fenceLang } = parseCodeBlock(content);
@@ -278,21 +304,25 @@ export function parseFromContent(content: string, filePath: string, artifactRoot
     };
 }
 
+/**
+ * Reads and fully parses a single vault `.md` artifact file into a structured object.
+ *
+ * Thin wrapper around `parseFromContent` that handles disk I/O. Combines frontmatter,
+ * code block, and vars section into a `ParsedArtifactFile` that the picker panel
+ * uses for display and insert-time variable resolution.
+ *
+ * @param filePath - Absolute path to the `.md` file on disk.
+ * @param artifactRootDir - Absolute path to the artifact's root directory
+ *   (e.g. `/vault/Snippets`). Used to compute the `relativePath` field.
+ * @returns Fully populated `ParsedArtifactFile`, or `null` if the file cannot be read.
+ *
+ * @example
+ * parseArtifactFile('/vault/Snippets/Web/express-route.md', '/vault/Snippets')
+ */
 export function parseArtifactFile(filePath: string, artifactRootDir: string): ParsedArtifactFile | null {
     try {
         const content = fs.readFileSync(filePath, 'utf-8');
-        const frontmatter = parseFrontmatter(content);
-        const { code, fenceLang } = parseCodeBlock(content);
-        if (!frontmatter.language && fenceLang) { frontmatter.language = fenceLang; }
-        return {
-            filePath,
-            fileName:     path.basename(filePath, '.md'),
-            relativePath: path.relative(artifactRootDir, filePath),
-            frontmatter,
-            code,
-            vars:         parseVars(content),
-            blocks:       parseBlocks(content),
-        };
+        return parseFromContent(content, filePath, artifactRootDir);
     } catch {
         // File unreadable or parse error — caller shows appropriate UI feedback
         return null;

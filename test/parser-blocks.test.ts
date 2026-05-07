@@ -228,4 +228,51 @@ suite('parseBlocks', () => {
         assert.deepStrictEqual(parseBlocks(''), []);
     });
 
+    // ── Vars-fence support (multi-block variable sets) ────────────────────────
+
+    test('```vars fence parses KEY=value pairs into block.vars', () => {
+        const content = [
+            '## Local Dev',
+            '```vars',
+            'VK-host=localhost',
+            'VK-port=3000',
+            '```',
+        ].join('\n');
+        const blocks = parseBlocks(content);
+        assert.strictEqual(blocks.length, 1);
+        assert.strictEqual(blocks[0].fenceLang, 'vars');
+        assert.deepStrictEqual(blocks[0].vars, [
+            { name: 'VK-host', defaultValue: 'localhost' },
+            { name: 'VK-port', defaultValue: '3000' },
+        ]);
+    });
+
+    test('```vars fence with empty value yields defaultValue: ""', () => {
+        const content = [
+            '## Empty Defaults',
+            '```vars',
+            'VK-token=',
+            '```',
+        ].join('\n');
+        const blocks = parseBlocks(content);
+        assert.deepStrictEqual(blocks[0].vars, [{ name: 'VK-token', defaultValue: '' }]);
+    });
+
+    test('multi-block variable file: each ```vars fence yields its own KEY=value vars', () => {
+        const content = [
+            '## Dev',
+            '```vars',
+            'VK-host=localhost',
+            '```',
+            '',
+            '## Prod',
+            '```vars',
+            'VK-host=prod.example.com',
+            '```',
+        ].join('\n');
+        const blocks = parseBlocks(content);
+        assert.deepStrictEqual(blocks[0].vars, [{ name: 'VK-host', defaultValue: 'localhost' }]);
+        assert.deepStrictEqual(blocks[1].vars, [{ name: 'VK-host', defaultValue: 'prod.example.com' }]);
+    });
+
 });

@@ -318,6 +318,72 @@ The extension uses `<VK-xxx>` as the placeholder syntax for vault artifact varia
 
 ---
 
+## Variable Sets
+
+Variable Sets are reusable bundles of `<VK-xxx>` defaults that the user can apply
+to any artifact at insert time. They live alongside snippets/templates/etc. in
+their own vault directory and are consumed by a dedicated picker, scorer, and
+diff-preview flow.
+
+**Storage and shape:**
+
+- Variable set files live in the vault's `Variables/` directory with `type: variables` frontmatter.
+- A single-block variable file uses one ` ```vars ` fence — its top-level `vars` are the whole set.
+- A multi-block variable file uses `## Heading` + ` ```vars ` blocks. Each heading is an independent sub-set with its own `vars`.
+
+**Scoring and picking:**
+
+- Sub-sets are scored against the active artifact by a combined metric:
+  `score = matchRatio * 0.7 + (tagMatches / totalArtifactTags) * 0.3`.
+- Var matching is by exact `name` field (full `VK-xxx` token, case-sensitive).
+- Tag matching counts how many of the artifact's frontmatter `tags` also appear on the variable file's frontmatter.
+
+**Apply flow:**
+
+1. User clicks **[Apply Variable Set]** in the preview panel's variables section.
+2. A QuickPick opens listing every sub-set across every variable file, sorted by score descending.
+3. The user picks a sub-set → the extension calls `applyVarSet(currentValues, subSet.vars)` and posts the resulting `changes[]` to the webview as a diff preview (`renderVarSetDiffHtml`).
+4. The user clicks **Apply** (commits the change set) or **Cancel** (reverts to inputs).
+5. After Apply, filled/overridden inputs gain a `from: <setName>` badge. Manually editing such an input clears its badge.
+
+**Stacking:**
+
+- Applying multiple sets in sequence stacks them: overlapping vars are overridden by the latest set; non-overlapping vars from earlier sets persist.
+
+**Save-as flow:**
+
+- The variables section also exposes **[Save as Variable Set]**, visible only when at least one input has a non-empty value.
+- On click the extension prompts for title and (optional) description, then writes a new `Variables/<slug>.md` file. The slug is the lowercase-hyphenated form of the title; tags are copied from the active artifact.
+- The shared `VarSetScanner` cache is invalidated after the write so the next pick run sees the new file.
+
+**Source tracking:**
+
+- `PreviewModeController.varSources` holds `varName → setName` mappings so the `from: <setName>` badge persists across extension-side re-renders within an artifact session.
+- The webview clears its badge (and posts `clearVarSource`) when the user manually edits an input.
+
+**Module map:**
+
+- Service layer — `src/services/varset.service.ts` — `VarSetScanner` (cached recursive scan), `scoreVarSet`, `extractSubSets`, `applyVarSet`. Pure functions are unit-tested in `test/varset-*.test.ts`.
+- Picker — `src/ui/panels/varsetPicker.panel.ts` — exposes `pickVarSet(artifactVars, artifactTags, variablesDirUri, extensionUri)` plus `getVarSetScanner()` for cache invalidation from outside.
+- Diff renderer — `src/ui/panels/artifactPicker/varSetDiff.ts` — `renderVarSetDiffHtml(changes, subSetName)`.
+- Controller — `src/ui/panels/artifactPicker/varSetController.ts` — `VarSetController` class composed by `PreviewPanelController`; routes `pickVarSet` / `confirmApply` / `cancelApply` / `saveAsVarSet` messages.
+- Types — `src/types/varset.types.ts` — `VarSetMatch`, `VarSubSet`, `ApplyChange`, `ApplyResult`.
+
+**Webview ↔ extension messages added:**
+
+| Direction | Command | Payload |
+|---|---|---|
+| webview → ext | `pickVarSet` | `{ values: Record<string,string> }` |
+| webview → ext | `confirmApply` | — |
+| webview → ext | `cancelApply` | — |
+| webview → ext | `saveAsVarSet` | `{ values: Record<string,string> }` |
+| webview → ext | `clearVarSource` | `{ name: string }` |
+| ext → webview | `showVarSetDiff` | `{ html: string, subSetName: string }` |
+| ext → webview | `varSetApplied` | `{ values, subSetName, varNames }` |
+| ext → webview | `varSetCancelled` | — |
+
+---
+
 ## Key Config Files
 
 | File | Purpose |

@@ -38,6 +38,10 @@ export class PreviewModeController {
     private readonly editingSections = new Set<SectionKey>();
     private readonly sectionDrafts   = new Map<SectionKey, SectionDraft>();
 
+    // ── Applied variable-set sources ──────────────────────────────────────────
+    /** Map of full var name → source variable-set heading; survives re-renders within an artifact session. */
+    private readonly varSources = new Map<string, string>();
+
     /**
      * @param originalCode - Artifact code string shown in preview mode and used
      *                       as the base for insertable content.
@@ -215,6 +219,53 @@ export class PreviewModeController {
         return this.sectionDrafts.get(section) ?? null;
     }
 
+    // ── Applied variable-set tracking ─────────────────────────────────────────
+
+    /**
+     * Records that a variable-set was the source of a value for `name`.
+     *
+     * Used by the preview panel to render a `from: <setName>` badge alongside
+     * the input. The mapping survives extension-side re-renders within the same
+     * artifact session.
+     *
+     * @param name    - Full var name (e.g. `'VK-host'`).
+     * @param setName - Heading of the variable sub-set the value originated from.
+     * @returns `void`
+     *
+     * @example
+     * ctrl.setVarSource('VK-host', 'Local Development');
+     */
+    setVarSource(name: string, setName: string): void {
+        this.varSources.set(name, setName);
+    }
+
+    /**
+     * Removes the source attribution for `name` — called after the user manually edits the input.
+     *
+     * @param name - Full var name to clear.
+     * @returns `void`
+     *
+     * @example
+     * ctrl.clearVarSource('VK-host');
+     */
+    clearVarSource(name: string): void {
+        this.varSources.delete(name);
+    }
+
+    /**
+     * Returns a snapshot of every var → source mapping currently held.
+     *
+     * @returns Plain object of `{ varName: setName }`.
+     *
+     * @example
+     * ctrl.getAllVarSources(); // { 'VK-host': 'Local Development' }
+     */
+    getAllVarSources(): Record<string, string> {
+        const out: Record<string, string> = {};
+        for (const [k, v] of this.varSources) { out[k] = v; }
+        return out;
+    }
+
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     /**
@@ -230,5 +281,6 @@ export class PreviewModeController {
     dispose(): void {
         this.editingSections.clear();
         this.sectionDrafts.clear();
+        this.varSources.clear();
     }
 }

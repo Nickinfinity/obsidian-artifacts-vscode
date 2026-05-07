@@ -16,6 +16,7 @@ import {
 } from './preview.helpers.js';
 import { buildCodeBlockHtml, CODE_BLOCK_CLIENT_JS } from './codeBlock.js';
 import { FullEditController } from './fullEditor.js';
+import { VarSetController } from './varSetController.js';
 
 // Re-export the adapter so the navigator does not need to import preview.helpers directly.
 export const blockAsArtifact = _blockAsArtifact;
@@ -51,6 +52,7 @@ export class PreviewPanelController {
     private modeController: PreviewModeController | undefined;
     private msgSub: vscode.Disposable | undefined;
     private readonly fullEdit: FullEditController;
+    private readonly varSet:   VarSetController;
 
     constructor(private readonly cb: PreviewCallbacks) {
         this.fullEdit = new FullEditController({
@@ -59,6 +61,14 @@ export class PreviewPanelController {
             setCurrentArtifact:  a => { this.currentArtifact = a; },
             setCache:            cb.setCache,
             postMessage:         msg => { void this.panel?.webview.postMessage(msg); },
+        });
+        this.varSet = new VarSetController(cb.extensionUri, {
+            getCurrentArtifact: () => this.currentArtifact,
+            postMessage:        msg => { void this.panel?.webview.postMessage(msg); },
+            rememberAppliedSet: (subSetName, varNames) => {
+                if (!this.modeController) { return; }
+                for (const name of varNames) { this.modeController.setVarSource(name, subSetName); }
+            },
         });
     }
 
@@ -94,7 +104,8 @@ export class PreviewPanelController {
         if (!this.ensurePanel()) { return; }
 
         const codeRowsHtml = renderCodeRowsHtml(artifact.code, artifact.frontmatter.language);
-        this.panel!.webview.html = renderPreviewHtml(artifact, codeRowsHtml, getNonce(), this.cssUri, this.cspSource);
+        const varSources   = this.modeController?.getAllVarSources() ?? {};
+        this.panel!.webview.html = renderPreviewHtml(artifact, codeRowsHtml, getNonce(), this.cssUri, this.cspSource, varSources);
         this.setupMessageHandler();
         this.reveal(true);
         out.appendLine(`[popup] preview → ${artifact.fileName}`);
@@ -182,6 +193,11 @@ export class PreviewPanelController {
         else if (cmd === 'saveSection')   { await this.handleSaveSection(msg); }
         else if (cmd === 'insert')        { this.handleInsert(msg); }
         else if (cmd === 'cancel')        { this.dispose(); }
+        else if (cmd === 'pickVarSet')    { await this.varSet.handlePickVarSet(msg); }
+        else if (cmd === 'confirmApply')  { this.varSet.handleConfirmApply(); }
+        else if (cmd === 'cancelApply')   { this.varSet.handleCancelApply(); }
+        else if (cmd === 'saveAsVarSet')  { await this.varSet.handleSaveAsVarSet(msg); }
+        else if (cmd === 'clearVarSource'){ this.modeController?.clearVarSource(msg.name as string); }
     }
 
     private handleFullEdit(): void {
@@ -286,6 +302,7 @@ function renderPreviewHtml(
     nonce: string,
     cssUri: string,
     cspSource: string,
+    varSources: Record<string, string> = {},
 ): string {
     const e = escHtml;
     const title    = e(a.frontmatter.title || a.fileName);
@@ -297,12 +314,17 @@ function renderPreviewHtml(
     const tagsHtml = (a.frontmatter.tags ?? []).map(t => `<span class="tag">${e(t)}</span>`).join('');
 
     const inputsHtml = a.vars.length > 0
-        ? a.vars.map(v => `
+        ? a.vars.map(v => {
+            const src = varSources[v.name];
+            const badge = src ? `<span class="var-source" data-var-source="${e(v.name)}">from: ${e(src)}</span>` : '';
+            return `
              <div class="input-row">
                <label for="v-${e(v.name)}">${e(labelForVar(v.name))}</label>
                <input id="v-${e(v.name)}" data-var="${e(v.name)}" type="text"
                       value="${e(v.defaultValue)}" placeholder="${e(labelForVar(v.name))}">
-             </div>`).join('')
+               ${badge}
+             </div>`;
+          }).join('')
         : '<p class="muted">No variables defined.</p>';
 
     return /* html */`<!DOCTYPE html>
@@ -324,7 +346,13 @@ function renderPreviewHtml(
   ${tagsHtml ? `<div class="tags">${tagsHtml}</div>` : ''}
   ${buildCodeBlockHtml(codeRowsHtml, lang)}
   <div class="slabel">Variables</div>
-  <div class="inputs" id="varInputs">${inputsHtml}</div>
+  <div id="varsSection">
+    <div class="inputs" id="varInputs">${inputsHtml}</div>
+    <div class="actions varset-actions">
+      <button class="btn btn-secondary" id="applyVarSetBtn">Apply Variable Set</button>
+      <button class="btn btn-secondary" id="saveAsVarSetBtn" style="display:none;">Save as Variable Set</button>
+    </div>
+  </div>
   <div class="actions">
     <button class="btn btn-insert"    id="insertBtn">Insert</button>
     <button class="btn btn-secondary" id="editBtn">Edit .md</button>
@@ -360,6 +388,43 @@ function renderPreviewHtml(
     }
   });
 
+  // ── Variable-set buttons ─────────────────────────────────────────────────
+  const varsSection = document.getElementById('varsSection');
+  let savedVarsHtml = null;  // snapshot of inputs HTML used to restore on cancelApply
+
+  function refreshSaveBtn() {
+    const btn = document.getElementById('saveAsVarSetBtn');
+    if (!btn) { return; }
+    const hasValue = Object.values(collectVars()).some(function (v) { return v && v.length > 0; });
+    btn.style.display = hasValue ? '' : 'none';
+  }
+
+  const applyBtn = document.getElementById('applyVarSetBtn');
+  if (applyBtn) {
+    applyBtn.addEventListener('click', function () {
+      vscode.postMessage({ command: 'pickVarSet', values: collectVars() });
+    });
+  }
+  const saveBtn = document.getElementById('saveAsVarSetBtn');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', function () {
+      vscode.postMessage({ command: 'saveAsVarSet', values: collectVars() });
+    });
+  }
+  varInputs.addEventListener('input', function (ev) {
+    const t = ev.target;
+    if (t && t.dataset && t.dataset.var) {
+      // Manual edit removes the source badge for this var.
+      const badge = varInputs.querySelector('[data-var-source="' + t.dataset.var + '"]');
+      if (badge) {
+        badge.remove();
+        vscode.postMessage({ command: 'clearVarSource', name: t.dataset.var });
+      }
+    }
+    refreshSaveBtn();
+  });
+  refreshSaveBtn();
+
   // ── updateVars / fileUpdated incoming messages ──────────────────────────
   function rebuildVarInputs(vars) {
     const existing = collectVars();
@@ -381,13 +446,57 @@ function renderPreviewHtml(
       '</div>';
     }).join('');
   }
+  // ── Var-set diff / applied / cancelled handlers ─────────────────────────
+  function showDiffView(html) {
+    if (!varsSection) { return; }
+    if (savedVarsHtml === null) { savedVarsHtml = varsSection.innerHTML; }
+    varsSection.innerHTML = html;
+    const applyBtn  = document.getElementById('varSetApplyBtn');
+    const cancelBtn = document.getElementById('varSetCancelBtn');
+    if (applyBtn)  { applyBtn.addEventListener('click',  function () { vscode.postMessage({ command: 'confirmApply' }); }); }
+    if (cancelBtn) { cancelBtn.addEventListener('click', function () { vscode.postMessage({ command: 'cancelApply'  }); }); }
+  }
+  function restoreVarsView() {
+    if (!varsSection || savedVarsHtml === null) { return; }
+    varsSection.innerHTML = savedVarsHtml;
+    savedVarsHtml = null;
+    refreshSaveBtn();
+  }
+  function applyValuesAndBadges(values, subSetName, varNames) {
+    restoreVarsView();
+    const inputs = document.querySelectorAll('[data-var]');
+    inputs.forEach(function (el) {
+      const name = el.dataset.var;
+      if (Object.prototype.hasOwnProperty.call(values, name)) { el.value = values[name]; }
+    });
+    const flagged = new Set(varNames || []);
+    flagged.forEach(function (name) {
+      const input = varInputs.querySelector('[data-var="' + name + '"]');
+      if (!input) { return; }
+      const row = input.closest('.input-row');
+      if (!row) { return; }
+      const existing = row.querySelector('[data-var-source]');
+      if (existing) { existing.remove(); }
+      const badge = document.createElement('span');
+      badge.className = 'var-source';
+      badge.dataset.varSource = name;
+      badge.textContent = 'from: ' + subSetName;
+      row.appendChild(badge);
+    });
+    refreshSaveBtn();
+  }
+
   window.addEventListener('message', function (event) {
     const msg = event.data || {};
-    if (msg.command === 'updateVars')  { rebuildVarInputs(msg.vars); }
+    if (msg.command === 'updateVars')  { rebuildVarInputs(msg.vars); refreshSaveBtn(); }
     if (msg.command === 'fileUpdated' && msg.artifact) {
       window.__codeBlock.setCode(msg.artifact.code || '');
       rebuildVarInputs(msg.artifact.vars);
+      refreshSaveBtn();
     }
+    if (msg.command === 'showVarSetDiff') { showDiffView(msg.html); }
+    if (msg.command === 'varSetApplied')  { applyValuesAndBadges(msg.values || {}, msg.subSetName || '', msg.varNames || []); }
+    if (msg.command === 'varSetCancelled'){ restoreVarsView(); }
   });
 })();
 </script>

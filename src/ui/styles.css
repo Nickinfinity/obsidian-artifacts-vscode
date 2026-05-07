@@ -566,3 +566,68 @@ button:hover {
   border-radius: 3px;
   padding: 0 2px;
 }
+
+/* ── Variable-set diff preview ────────────────────────────────────────────── */
+
+.varset-diff-title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 12px 0 8px;
+}
+
+.varset-diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin-bottom: 12px;
+}
+
+.varset-diff-table th,
+.varset-diff-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--vscode-widget-border, #444);
+  vertical-align: top;
+}
+
+.varset-diff-table th {
+  font-weight: 600;
+  color: var(--vscode-descriptionForeground);
+}
+
+.varset-diff-table code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85rem;
+}
+
+.varset-diff-table .empty {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.diff-filled {
+  border-left: 3px solid var(--vscode-charts-green, #4ec9b0);
+  background: rgba(78, 201, 176, 0.06);
+}
+
+.diff-overridden {
+  border-left: 3px solid var(--vscode-charts-orange, #e8a64a);
+  background: rgba(232, 166, 74, 0.06);
+}
+
+.diff-kept {
+  color: var(--vscode-descriptionForeground);
+  border-left: 3px solid transparent;
+}
+
+/* ── Var-set source badge on filled inputs ─────────────────────────────────── */
+
+.var-source {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 0.75rem;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-editorWidget-background, rgba(255, 255, 255, 0.05));
+  border-radius: 3px;
+  padding: 1px 6px;
+}
