@@ -3,6 +3,6 @@ dist
 node_modules
 .vscode-test/
 *.vsix
-/.claude/*
-/.claude-flow/*
+.claude/
+.claude-flow/
 .mcp.json
