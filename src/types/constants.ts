@@ -20,5 +20,4 @@ export const ARTIFACTS: ArtifactsArray = [
 	{ name: 'Commands',      dir: 'Commands',   default: false, contexts: ['terminal'] },
 	{ name: 'Templates',     dir: 'Templates',  default: false, contexts: ['editor', 'explorer'] },
 	{ name: 'Variables',     dir: 'Variables',  default: false, contexts: ['all'] },
-	{ name: 'LeetCode',      dir: 'LeetCode',   default: false, contexts: ['editor'], icon: 'beaker' },
 ];

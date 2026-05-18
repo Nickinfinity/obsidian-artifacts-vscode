@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { ARTIFACTS } from '../types/constants.js';
 import { openArtifactPicker } from '../ui/panels/artifactPicker.panel.js';
-import { openLeetCodePicker } from './leetcode.command.js';
 
 /**
  * Derives the VS Code command ID for an artifact's insert command.
@@ -77,10 +76,6 @@ export function registerInsertCommands(context: vscode.ExtensionContext): void {
         const commandId = artifactCommandId(artifact.dir);
 
         const disposable = vscode.commands.registerCommand(commandId, () => {
-            if (artifact.dir === 'LeetCode') {
-                void openLeetCodePicker(artifact.dir, artifact.name, context.extensionUri);
-                return;
-            }
             void openArtifactPicker(artifact.dir, artifact.name, context.extensionUri);
         });
 

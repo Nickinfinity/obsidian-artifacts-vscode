@@ -35,8 +35,7 @@ src/
 ├── extension.ts                      # Entry point — activate() / deactivate()
 ├── commands/
 │   ├── openSettings.command.ts       # Registers obsidian-artifacts.settings
-│   ├── insert.command.ts             # Dynamically registers one insert command per artifact
-│   └── leetcode.command.ts           # openLeetCodePicker — LeetCode QuickPick + preview panel session
+│   └── insert.command.ts             # Dynamically registers one insert command per artifact
 ├── services/
 │   ├── vault.service.ts              # validateObsidianVault(), detectVaultDirs(), createVaultDirectory()
 │   ├── context.service.ts            # setVaultContextKeys(), refreshVaultContext()
@@ -44,17 +43,7 @@ src/
 │   ├── render.service.ts             # renderCodeHtml(), renderCodeRowsHtml(), renderLineHtml()
 │   ├── artifact-patcher.service.ts   # patchFrontmatterField(), patchVarDefaults()
 │   ├── preview-mode.service.ts       # PreviewModeController — mode state + section editing
-│   ├── temp-document.service.ts      # TempDocument — scratch VS Code editor tab for full edit
-│   ├── leetcode-parser.service.ts    # parseLeetCode() — .md → ParsedLeetCode
-│   ├── leetcode-runner.service.ts    # detectRuntime(), runSingleTest(), runAllTests()
-│   ├── leetcode-codegen.service.ts   # mapType(), generateBoilerplate(), generateTestHarness(),
-│   │                                 # jsonToLiteral(), injectSolution()
-│   ├── leetcode-timer.service.ts     # LeetCodeTimer — start/stop/getElapsed/reset
-│   └── lang-runners/
-│       ├── runner.types.ts           # Re-export of LangRunner from types/
-│       ├── java.runner.ts            # javaRunner config
-│       ├── javascript.runner.ts      # jsRunner config
-│       └── python.runner.ts          # pythonRunner config
+│   └── temp-document.service.ts      # TempDocument — scratch VS Code editor tab for full edit
 ├── ui/
 │   ├── panels/
 │   │   ├── artifactPicker.panel.ts        # Re-export shim (back-compat for insert.command.ts)
@@ -69,14 +58,12 @@ src/
 │   │   │   ├── fullEditor.helpers.ts      # Part 4 — FULL_EDIT_VAR_SYNC_DEBOUNCE_MS
 │   │   │   └── shared.ts                  # `out` OutputChannel singleton
 │   │   ├── REFACTOR_PLAN.md               # Refactor blueprint (split rationale + state ownership)
-│   │   ├── settings.panel.ts              # Settings webview panel (UI + message handling)
-│   │   └── leetcodePreview.panel.ts       # renderLeetCodePreviewHtml(), renderTestResultsHtml()
+│   │   └── settings.panel.ts              # Settings webview panel (UI + message handling)
 │   └── styles.css                         # Shared webview stylesheet — loaded via webview.asWebviewUri()
 ├── types/
 │   ├── constants.ts                  # ARTIFACTS — master list of artifact directories
 │   ├── artifact.types.ts             # Artifact, ArtifactContext, ArtifactsArray interfaces
 │   ├── parsed-artifact.types.ts      # ParsedArtifactFile, ParsedBlock, ParsedFrontmatter, ParsedVar, VaultEntry
-│   ├── leetcode.types.ts             # LeetCode-specific types (ParsedLeetCode, LangRunner, …)
 │   └── webview-messages.types.ts     # Typed message shapes exchanged between extension and webviews
 ├── utils/
 │   └── helpers.ts                    # getNonce() for CSP nonces
@@ -86,17 +73,7 @@ test/
 ├── extension.test.ts                 # Mocha test suite
 ├── artifact-patcher.test.ts          # Unit tests for artifact-patcher.service
 ├── preview-modes.test.ts             # Unit tests for preview-mode.service
-├── temp-document.test.ts             # Unit tests for temp-document.service
-├── leetcode-parser.test.ts           # parseLeetCode coverage
-├── leetcode-typemap.test.ts          # mapType primitives / arrays / maps / passthrough
-├── leetcode-codegen.test.ts          # generateBoilerplate / generateTestHarness / jsonToLiteral
-├── leetcode-runners.test.ts          # java/javascript/python runner configs
-├── leetcode-runner.test.ts           # detectRuntime / runSingleTest / runAllTests
-├── leetcode-timer.test.ts            # LeetCodeTimer class
-├── leetcode-inject.test.ts           # injectSolution
-├── leetcode-preview.test.ts          # renderLeetCodePreviewHtml / renderTestResultsHtml
-└── fixtures/
-    └── leetcode-ab-check.md          # Integration test fixture (AB Check problem)
+└── temp-document.test.ts             # Unit tests for temp-document.service
 ```
 
 ---
@@ -404,162 +381,6 @@ diff-preview flow.
 | ext → webview | `showVarSetDiff` | `{ html: string, subSetName: string }` |
 | ext → webview | `varSetApplied` | `{ values, subSetName, varNames }` |
 | ext → webview | `varSetCancelled` | — |
-
----
-
-## LeetCode Artifacts
-
-LeetCode artifacts turn vault `.md` notes into runnable coding challenges with auto-generated boilerplate, a per-language test harness, and a child-process test runner.
-
-**Jira Epic:** VSX-35 — LeetCode Code Practice Runner
-
-### File format
-
-A `type: leetcode` artifact carries problem metadata, a Markdown description, `## Examples`, `## Tests`, and a `# Solutions` tree:
-
-```md
----
-type: leetcode
-title: Two Sum
-difficulty: easy
-function: twoSum
-algorithm: hash-map
-status: unsolved
-params:
-  - { name: nums, type: int[] }
-  - { name: target, type: int }
-returns: int[]
-tags: [leetcode, arrays, hash-map]
----
-
-Problem description as Markdown prose.
-
-## Examples
-```example
-input: nums = [2,7,11,15], target = 9
-output: [0,1]
-```
-
-## Tests
-```json
-[
-  { "input": { "nums": [2,7,11,15], "target": 9 }, "expected": [0,1] },
-  { "input": { "nums": [3,2,4], "target": 6 }, "expected": [1,2] }
-]
-```
-
-# Solutions
-
-## Java
-### Hash Map
-<!-- meta: { "solved_at": "2025-05-12T14:30:00", "duration": "8m22s" } -->
-```java
-public static int[] twoSum(int[] nums, int target) { /* … */ }
-```
-
-## Python
-```python
-def two_sum(nums, target): ...
-```
-```
-
-### Frontmatter fields
-
-| Field | Type | Required | Default | Notes |
-|---|---|---|---|---|
-| `type` | `'leetcode'` | yes | — | Discriminator |
-| `title` | string | yes | — | Display title |
-| `difficulty` | `LeetCodeDifficulty` | no | `'easy'` | `easy` / `medium` / `hard` |
-| `function` | string | yes | — | Function name to implement |
-| `algorithm` | string | no | — | Category tag (e.g. `hash-map`) |
-| `status` | `LeetCodeStatus` | no | `'unsolved'` | Auto-updated on successful Submit |
-| `params` | `{ name, type }[]` | yes | — | Generic types (see mapping below) |
-| `returns` | string | yes | — | Generic return type |
-| `tags` | string[] | no | `[]` | Organisational tags |
-
-### Section semantics
-
-- **Description** — Markdown between closing `---` and first `#`/`##` heading.
-- **Examples** — `` ```example `` fences under `## Examples`, each with `input:` / `output:` lines.
-- **Tests** — `` ```json `` fence under `## Tests`. Array of `{ input: Record<string, unknown>, expected: unknown }`. Input keys must match `params` names.
-- **Solutions** — `# Solutions` → `## <Language>` → optional `### <Label>` + fenced code block. Multiple solutions per language allowed; unlabelled ones are auto-numbered `Solution #1`, `#2`, …
-- **Solution metadata** — `<!-- meta: { "solved_at": "ISO-8601", "duration": "XmYs" } -->` comment immediately preceding the fence is parsed into `LeetCodeSolution.solvedAt` / `.duration`.
-
-### Code generation
-
-Boilerplate is two-layered:
-
-| Layer | Source | Purpose |
-|---|---|---|
-| 1 | Built-in language templates | Default runnable wrapper from `function` + `params` + `returns` (Java: `class Main` + `Scanner`; Python: `input()`; JS: `readline`) |
-| 3 | Override code blocks in `.md` | Used only when the default wrapper does not fit |
-
-The wrapper holds a `<<SOLUTION>>` marker; `injectSolution(boilerplate, code)` replaces it while preserving indentation.
-
-### Generic → language type mapping
-
-`mapType(generic, language)` translates frontmatter generics to language-native types. Unknown generics pass through unchanged; unknown languages return the generic as-is. Java boxes primitives inside generics (`int` → `Integer`).
-
-| Generic | Java | Python | JavaScript | Rust |
-|---|---|---|---|---|
-| `int` | `int` | `int` | `number` | `i32` |
-| `float` | `double` | `float` | `number` | `f64` |
-| `string` | `String` | `str` | `string` | `String` |
-| `bool` | `boolean` | `bool` | `boolean` | `bool` |
-| `int[]` | `int[]` | `List[int]` | `number[]` | `Vec<i32>` |
-| `int[][]` | `int[][]` | `List[List[int]]` | `number[][]` | `Vec<Vec<i32>>` |
-| `map<string,int>` | `Map<String, Integer>` | `Dict[str, int]` | `Record<string, number>` | `HashMap<String, i32>` |
-
-### Test runner
-
-- `generateTestHarness(parsed, language)` emits per-language assert-based unit tests from the JSON test cases.
-- `runSingleTest` / `runAllTests` spawn a child process per `LangRunner` (`javac` + `java`, `node`, `python3`), capture stdout, and compare against `expected`.
-- 5 s timeout per test case.
-- `detectRuntime(runner)` shells out `runner.detectCmd` to confirm the toolchain is installed.
-- **Run Tests** executes the first 3 test cases (quick dev feedback).
-- **Submit** executes all test cases; on full pass it updates `status: 'solved'` in frontmatter and writes the `<!-- meta: … -->` line for the active solution.
-
-### Timer
-
-`LeetCodeTimer` starts on the first Run Tests press and stops on a successful Submit. Elapsed time is formatted as `XmYs` and recorded in the solution metadata comment.
-
-### Preview panel
-
-`ui/panels/leetcodePreview.panel.ts` renders a LeetCode-specific view: description, difficulty badge (green/orange/red), status badge, algorithm tag, examples as cards, language selector (populated from parsed solutions), syntax-highlighted solution code, Run Tests / Submit buttons, and a results table with pass/fail, actual vs expected, per-test duration, and summary.
-
-### Module map
-
-```
-src/
-├── services/
-│   ├── leetcode-parser.service.ts     # parseLeetCode() → ParsedLeetCode
-│   ├── leetcode-runner.service.ts     # detectRuntime(), runSingleTest(), runAllTests()
-│   ├── leetcode-codegen.service.ts    # mapType(), generateBoilerplate(), generateTestHarness(),
-│   │                                  # jsonToLiteral(), injectSolution()
-│   ├── leetcode-timer.service.ts      # LeetCodeTimer
-│   └── lang-runners/
-│       ├── runner.types.ts            # Re-exports LangRunner from types/
-│       ├── java.runner.ts             # javaRunner
-│       ├── javascript.runner.ts       # jsRunner
-│       └── python.runner.ts           # pythonRunner
-├── ui/panels/
-│   └── leetcodePreview.panel.ts       # renderLeetCodePreviewHtml(), renderTestResultsHtml()
-└── types/
-    └── leetcode.types.ts              # LeetCodeStatus, LeetCodeDifficulty, ParamDef,
-                                       # TestCase, TestResult, LeetCodeSolution,
-                                       # ParsedLeetCode, LangRunner
-test/
-├── leetcode-parser.test.ts
-├── leetcode-typemap.test.ts
-├── leetcode-codegen.test.ts
-├── leetcode-runners.test.ts
-├── leetcode-runner.test.ts
-├── leetcode-timer.test.ts
-├── leetcode-inject.test.ts
-├── leetcode-preview.test.ts
-└── fixtures/
-    └── leetcode-ab-check.md           # Integration fixture
-```
 
 ---
 

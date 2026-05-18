@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import type { ArtifactType, ParsedArtifactFile, ParsedBlock, ParsedFrontmatter, ParsedVar } from '../types/parsed-artifact.types.js';
 
 // Accepted `type` values — any unrecognised value keeps the 'snippet' fallback.
-const VALID_TYPES = new Set<string>(['snippet', 'template', 'command', 'agent', 'variables', 'leetcode']);
+const VALID_TYPES = new Set<string>(['snippet', 'template', 'command', 'agent', 'variables']);
 
 // Frontmatter keys copied verbatim into `ParsedFrontmatter` (string-typed).
 const STRING_FRONTMATTER_KEYS = new Set<string>(['title', 'description', 'language', 'env', 'target']);

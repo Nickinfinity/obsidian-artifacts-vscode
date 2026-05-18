@@ -43,11 +43,6 @@
         "command": "obsidian-artifacts.insert.variables",
         "category": "Obsidian Artifacts",
         "title": "See/Edit Variables"
-      },
-      {
-        "command": "obsidian-artifacts.insert.leetcode",
-        "category": "Obsidian Artifacts",
-        "title": "Open LeetCode"
       }
     ],
     "submenus": [
@@ -79,11 +74,6 @@
         {
           "command": "obsidian-artifacts.insert.variables",
           "when": "obsidian-artifacts.vaultConfigured && obsidian-artifacts.variablesActive && !obsidian-artifacts.editorHasMultiple",
-          "group": "obsidian@1"
-        },
-        {
-          "command": "obsidian-artifacts.insert.leetcode",
-          "when": "obsidian-artifacts.vaultConfigured && obsidian-artifacts.leetcodeActive && !obsidian-artifacts.editorHasMultiple",
           "group": "obsidian@1"
         },
         {
@@ -141,11 +131,6 @@
           "command": "obsidian-artifacts.insert.templates",
           "when": "obsidian-artifacts.templatesActive",
           "group": "1_insert@2"
-        },
-        {
-          "command": "obsidian-artifacts.insert.leetcode",
-          "when": "obsidian-artifacts.leetcodeActive",
-          "group": "1_insert@3"
         },
         {
           "command": "obsidian-artifacts.insert.variables",
@@ -222,11 +207,6 @@
           "type": "boolean",
           "default": false,
           "description": "Enable the Variables directory (appears in all context menus)."
-        },
-        "obsidianArtifacts.features.leetcode": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable the LeetCode directory (editor context menu)."
         }
       }
     }
